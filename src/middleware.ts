@@ -11,8 +11,8 @@ const isPublicRoute = createRouteMatcher([
   "/sign-up(.*)",
   "/welcome(.*)",
   "/pricing(.*)",
-  "/api/webhooks/(.*)",        // Stripe + Inngest webhooks — must be public
-  "/api/stripe/checkout(.*)",  // Checkout session creation — called from landing page
+  "/api/webhooks/(.*)",
+  "/api/stripe/checkout(.*)",
 ]);
 
 // In mock mode, skip Clerk entirely — all routes open
@@ -21,9 +21,9 @@ function mockMiddleware(_req: NextRequest) {
 }
 
 // In live mode, protect /dashboard and all API routes except the public ones above
-const liveMiddleware = clerkMiddleware(async (auth, req) => {
+const liveMiddleware = clerkMiddleware((auth, req) => {
   if (!isPublicRoute(req)) {
-    await auth.protect();
+    auth().protect();
   }
 });
 
@@ -31,7 +31,6 @@ export default MOCK_MODE ? mockMiddleware : liveMiddleware;
 
 export const config = {
   matcher: [
-    // Match everything except Next.js internals and static files
     "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
     "/(api|trpc)(.*)",
   ],
