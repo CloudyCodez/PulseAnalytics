@@ -1,0 +1,95 @@
+{
+  "name": "pulse",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "inngest:dev": "npx inngest-cli@latest dev",
+    "electron": "electron electron/main.js",
+    "electron:dev": "cross-env ELECTRON_DEV=true electron electron/main.js",
+    "electron:build": "next build && electron-builder",
+    "build:demo": "cross-env PULSE_BUILD=demo next build && cross-env PULSE_BUILD=demo electron-builder --config.productName=\"Pulse Demo\"",
+    "build:client": "next build && electron-builder --config.productName=\"Pulse\""
+  },
+  "build": {
+    "appId": "com.pulse.analytics",
+    "productName": "Pulse",
+    "copyright": "Copyright 2024 Pulse Analytics",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "standalone"
+      },
+      {
+        "from": ".next/static",
+        "to": "standalone/.next/static"
+      },
+      {
+        "from": "public",
+        "to": "standalone/public"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "electron/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Pulse",
+      "installerIcon": "electron/icon.ico",
+      "uninstallerIcon": "electron/icon.ico"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.3",
+    "@clerk/nextjs": "^5.2.4",
+    "@radix-ui/react-dialog": "^1.1.1",
+    "@radix-ui/react-dropdown-menu": "^2.1.1",
+    "@radix-ui/react-tooltip": "^1.1.2",
+    "@react-email/components": "^0.0.22",
+    "@shopify/shopify-api": "^11.0.0",
+    "@supabase/ssr": "^0.5.1",
+    "@supabase/supabase-js": "^2.45.1",
+    "clsx": "^2.1.1",
+    "framer-motion": "^11.3.21",
+    "googleapis": "^140.0.1",
+    "inngest": "^3.22.0",
+    "lucide-react": "^0.414.0",
+    "next": "14.2.5",
+    "react": "^18",
+    "react-dom": "^18",
+    "react-email": "^3.0.1",
+    "recharts": "^2.12.7",
+    "resend": "^3.5.0",
+    "stripe": "^16.5.0",
+    "svix": "^1.21.0",
+    "tailwind-merge": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "cross-env": "^7.0.3",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.5",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
+  }
+}

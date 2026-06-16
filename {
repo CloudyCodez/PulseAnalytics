@@ -1,0 +1,1 @@
+export default clerkMiddleware((auth, req) =
