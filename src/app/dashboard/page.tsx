@@ -5,7 +5,7 @@ import { useState } from "react";
 import Link from "next/link";
 
 const DOWNLOAD_URL =
-  "https://github.com/CloudyCodez/PulseAnalytics/releases/latest/download/Pulse-Setup.exe";
+  "https://github.com/CloudyCodez/PulseAnalytics/releases/download/v1.0.0/Pulse.Setup.0.1.0.exe";
 
 const PLAN_META: Record<string, { label: string; color: string; clients: string; price: string }> = {
   starter: { label: "Starter", color: "#00e5cc", clients: "1 client workspace",    price: "$49/mo" },
