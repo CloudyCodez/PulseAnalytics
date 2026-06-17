@@ -5,15 +5,21 @@ import { NextRequest, NextResponse } from "next/server";
  *
  * Shared endpoint for:
  *   1. The Pulse AI drawer (real-time chat about connected data)
- *   2. Weekly report commentary generation (called server-side by the report job)
+ *   2. Weekly report commentary generation
  *
- * Body:
+ * Hits the local Ollama instance at http://localhost:11434
+ * Model: llama3.1 (pulled during setup wizard)
+ * No external API calls — fully on-device, works offline.
+ *
+ * Body (chat mode):
  *   { messages: { role: "user"|"assistant", content: string }[] }
- *   { reportMode: true, data: ReportDataSnapshot }  ← for report commentary
  *
- * In live mode: calls Anthropic claude-sonnet-4-6 via the API.
- * If ANTHROPIC_API_KEY is not set (local dev): returns a canned reply.
+ * Body (report mode):
+ *   { reportMode: true, data: ReportDataSnapshot }
  */
+
+const OLLAMA_URL = "http://localhost:11434/api/chat";
+const MODEL      = "llama3.1";
 
 const SYSTEM_PROMPT = `You are Pulse AI — the built-in intelligence engine for Pulse Analytics.
 
@@ -33,6 +39,28 @@ Rules:
 
 type Message = { role: "user" | "assistant"; content: string };
 
+async function callOllama(messages: Message[]): Promise<string> {
+  const res = await fetch(OLLAMA_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: MODEL,
+      stream: false,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...messages,
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Ollama returned ${res.status}`);
+  }
+
+  const data = await res.json();
+  return data.message?.content ?? "No response from Pulse AI.";
+}
+
 export async function POST(req: NextRequest) {
   let body: { messages?: Message[]; reportMode?: boolean; data?: unknown } = {};
   try {
@@ -41,16 +69,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-
-  // ── Dev fallback — no API key ────────────────────────────────────────────────
-  if (!apiKey || apiKey.startsWith("sk-ant-mock")) {
-    return NextResponse.json({
-      reply: "Pulse AI is connected. To enable live AI responses, add your ANTHROPIC_API_KEY to .env.local and restart the server.",
-    });
-  }
-
-  // ── Report commentary mode ────────────────────────────────────────────────────
+  // ── Report commentary mode ─────────────────────────────────────────────────
   if (body.reportMode && body.data) {
     const prompt = `You are writing the AI commentary section of a weekly Pulse Analytics report.
 
@@ -58,67 +77,38 @@ Here is the data snapshot for this week:
 ${JSON.stringify(body.data, null, 2)}
 
 Write a structured commentary with exactly these three sections:
-1. **What happened this week** — 2-3 sentences summarising the key numbers
-2. **What's driving performance** — 2-3 sentences identifying the biggest factors (good or bad)
-3. **What to do next** — 3-4 specific, actionable recommendations with reasoning
+1. What happened this week — 2-3 sentences summarising the key numbers
+2. What's driving performance — 2-3 sentences identifying the biggest factors (good or bad)
+3. What to do next — 3-4 specific, actionable recommendations with reasoning
 
 Keep it professional but plain-English. No bullet points — full sentences only. Use the actual numbers from the data.`;
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: prompt }],
-        }),
-      });
-
-      const data = await res.json();
-      const text = data.content?.[0]?.text ?? "Could not generate commentary.";
-      return NextResponse.json({ commentary: text });
+      const commentary = await callOllama([{ role: "user", content: prompt }]);
+      return NextResponse.json({ commentary });
     } catch (err) {
       console.error("[Pulse AI] Report commentary error:", err);
-      return NextResponse.json({ error: "AI unavailable" }, { status: 500 });
+      return NextResponse.json({ error: "Pulse AI unavailable — is the app running?" }, { status: 503 });
     }
   }
 
-  // ── Chat mode ─────────────────────────────────────────────────────────────────
+  // ── Chat mode ──────────────────────────────────────────────────────────────
   const messages: Message[] = body.messages ?? [];
   if (messages.length === 0) {
     return NextResponse.json({ error: "No messages provided" }, { status: 400 });
   }
 
-  // Cap history to last 20 messages to stay within context limits
+  // Cap to last 20 messages
   const trimmed = messages.slice(-20);
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 600,
-        system: SYSTEM_PROMPT,
-        messages: trimmed,
-      }),
-    });
-
-    const data = await res.json();
-    const reply = data.content?.[0]?.text ?? "Sorry, I couldn't get a response. Try again.";
+    const reply = await callOllama(trimmed);
     return NextResponse.json({ reply });
   } catch (err) {
     console.error("[Pulse AI] Chat error:", err);
-    return NextResponse.json({ error: "AI unavailable" }, { status: 500 });
+    return NextResponse.json(
+      { reply: "Pulse AI is starting up — give it a moment and try again." },
+      { status: 200 } // soft error so the drawer handles it gracefully
+    );
   }
 }
