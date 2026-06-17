@@ -37,7 +37,6 @@ async function provisionUser(
     .single();
 
   if (existing?.clerk_user_id) {
-    // Already has an account — just update their plan
     await supabase
       .from("users")
       .update({
@@ -74,7 +73,7 @@ async function provisionUser(
     }
   }
 
-  // ── Create a one-time sign-in token (magic link) ───────────────────────────
+  // ── Create magic sign-in token ─────────────────────────────────────────────
   const signInToken = await clerkClient.signInTokens.createSignInToken({
     userId: clerkUser.id,
     expiresInSeconds: 60 * 60 * 24 * 7, // 7 days
@@ -95,7 +94,7 @@ async function provisionUser(
   );
 
   // ── Send welcome email via Resend ──────────────────────────────────────────
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://pulse.app";
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://pulseanalytics.space";
   const accessUrl = `${appUrl}/sign-in?token=${signInToken.token}`;
   const planName = PLAN_DISPLAY[plan] ?? plan;
 
@@ -154,8 +153,8 @@ async function provisionUser(
           <table cellpadding="0" cellspacing="0" width="100%">
             ${[
               ["1", "Click the button above", "Signs you in instantly — no password needed yet."],
-              ["2", "Connect your platforms", "Link Google Ads, Meta, Shopify, GA4 in about 5 minutes."],
-              ["3", "Get your first report", "Your first AI-written report arrives within 48 hours."],
+              ["2", "Download Pulse", "Get the desktop app and run the setup wizard to connect your platforms."],
+              ["3", "Get your first report", "Your first AI-written report arrives within 48 hours of connecting."],
             ].map(([n, title, desc]) => `
             <tr>
               <td width="36" valign="top" style="padding-bottom:16px;">
@@ -184,7 +183,7 @@ async function provisionUser(
         <!-- Footer -->
         <tr><td style="padding-top:24px;text-align:center;">
           <p style="font-size:12px;color:#4A5568;margin:0;">
-            © 2026 Pulse Analytics · You're receiving this because you signed up at pulse.app
+            © 2026 Pulse Analytics · <a href="https://pulseanalytics.space" style="color:#4A5568;">pulseanalytics.space</a>
           </p>
         </td></tr>
 
@@ -216,20 +215,17 @@ export async function POST(req: NextRequest) {
 
   switch (event.type) {
 
-    // ── Someone paid (via Payment Link or Checkout Session) ─────────────────
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
 
-      // Email comes from customer_details (Payment Link) or metadata (API checkout)
       const email =
         session.customer_details?.email ??
         session.customer_email ??
         session.metadata?.email;
 
-      const customerId    = session.customer as string;
+      const customerId     = session.customer as string;
       const subscriptionId = session.subscription as string;
 
-      // Resolve plan — check metadata first, then look up subscription price
       let plan = session.metadata?.plan;
       if (!plan && subscriptionId) {
         try {
@@ -246,12 +242,11 @@ export async function POST(req: NextRequest) {
       if (email) {
         await provisionUser(email, plan, customerId, subscriptionId);
       } else {
-        console.error("[Stripe] checkout.session.completed — no email found, cannot provision");
+        console.error("[Stripe] checkout.session.completed — no email found");
       }
       break;
     }
 
-    // ── Plan upgrade / downgrade ─────────────────────────────────────────────
     case "customer.subscription.updated": {
       const sub = event.data.object as Stripe.Subscription;
       const plan = getPlanFromPriceId(sub.items.data[0]?.price?.id ?? "");
@@ -265,7 +260,6 @@ export async function POST(req: NextRequest) {
       break;
     }
 
-    // ── Cancellation ─────────────────────────────────────────────────────────
     case "customer.subscription.deleted": {
       const sub = event.data.object as Stripe.Subscription;
       await supabase
@@ -275,11 +269,9 @@ export async function POST(req: NextRequest) {
       break;
     }
 
-    // ── Failed payment ───────────────────────────────────────────────────────
     case "invoice.payment_failed": {
       const invoice = event.data.object as Stripe.Invoice;
       console.warn(`[Stripe] Payment failed — customer: ${invoice.customer}`);
-      // TODO: send payment failure email, optionally downgrade after grace period
       break;
     }
 
