@@ -1,0 +1,284 @@
+"use client";
+
+import { useState, useEffect } from "react";
+
+type Integration = {
+  key: string;
+  name: string;
+  description: string;
+  icon: string;
+  iconBg: string;
+  iconColor: string;
+  configType: "oauth" | "apikey";
+  fields?: { id: string; label: string; placeholder: string; type?: string }[];
+  helpUrl?: string;
+};
+
+const INTEGRATIONS: Integration[] = [
+  {
+    key: "google",
+    name: "Google Ads & GA4",
+    description: "Pull campaign spend, ROAS, clicks, and GA4 sessions, users, and conversions into every report.",
+    icon: "G",
+    iconBg: "rgba(66,133,244,0.12)",
+    iconColor: "#4285F4",
+    configType: "oauth",
+  },
+  {
+    key: "meta",
+    name: "Meta Ads",
+    description: "Facebook & Instagram ad spend, ROAS, CPM, CTR, and creative performance breakdown.",
+    icon: "f",
+    iconBg: "rgba(24,119,242,0.12)",
+    iconColor: "#4080ff",
+    configType: "oauth",
+  },
+  {
+    key: "shopify",
+    name: "Shopify",
+    description: "Orders, revenue, AOV, refunds, top products, and customer acquisition data.",
+    icon: "S",
+    iconBg: "rgba(149,191,71,0.12)",
+    iconColor: "#95BF47",
+    configType: "apikey",
+    fields: [
+      { id: "shopify-store", label: "Store URL", placeholder: "yourstore.myshopify.com" },
+      { id: "shopify-token", label: "Admin API Access Token", placeholder: "shpat_xxxxxxxxxxxx", type: "password" },
+    ],
+    helpUrl: "https://help.shopify.com/en/manual/apps/app-types/custom-apps",
+  },
+  {
+    key: "klaviyo",
+    name: "Klaviyo",
+    description: "Email open rates, click rates, campaign revenue, flow performance, and list growth.",
+    icon: "K",
+    iconBg: "rgba(255,107,53,0.12)",
+    iconColor: "#ff6b35",
+    configType: "apikey",
+    fields: [
+      { id: "klaviyo-key", label: "Private API Key", placeholder: "pk_xxxxxxxxxxxx", type: "password" },
+    ],
+    helpUrl: "https://developers.klaviyo.com/en/docs/retrieve_api_credentials",
+  },
+];
+
+type Config = Record<string, unknown>;
+
+export default function IntegrationsPage() {
+  const [config, setConfig]       = useState<Config>({});
+  const [statuses, setStatuses]   = useState<Record<string, string>>({});
+  const [loading, setLoading]     = useState<Record<string, boolean>>({});
+  const [fieldVals, setFieldVals] = useState<Record<string, string>>({});
+
+  const pulse = typeof window !== "undefined"
+    ? (window as unknown as { pulse?: unknown }).pulse as {
+        getConfig: () => Promise<Config>;
+        saveConfig: (v: unknown) => Promise<unknown>;
+        startOAuth: (p: string) => Promise<{ success: boolean; error?: string }>;
+        verifyShopify: (s: string, t: string) => Promise<{ success: boolean; shopName?: string; error?: string }>;
+        verifyKlaviyo: (k: string) => Promise<{ success: boolean; orgName?: string; error?: string }>;
+        openExternal: (u: string) => void;
+      } | undefined
+    : undefined;
+
+  useEffect(() => {
+    if (pulse?.getConfig) {
+      pulse.getConfig().then((cfg: Config) => setConfig(cfg ?? {})).catch(() => {});
+    }
+  }, []);
+
+  function isConnected(key: string): boolean {
+    if (key === "google") return !!(config as Record<string, boolean>).google_connected;
+    if (key === "meta")   return !!(config as Record<string, boolean>).meta_connected;
+    if (key === "shopify") return !!(config as Record<string, Record<string, string>>).shopify?.store;
+    if (key === "klaviyo") return !!(config as Record<string, Record<string, string>>).klaviyo?.apiKey;
+    return false;
+  }
+
+  function setStatus(key: string, msg: string) {
+    setStatuses(s => ({ ...s, [key]: msg }));
+  }
+  function setLoad(key: string, v: boolean) {
+    setLoading(l => ({ ...l, [key]: v }));
+  }
+
+  async function connectOAuth(key: string) {
+    if (!pulse?.startOAuth) return;
+    setLoad(key, true);
+    setStatus(key, "Opening browser…");
+    const result = await pulse.startOAuth(key);
+    if (result.success) {
+      setStatus(key, "✓ Connected");
+      const updated = await pulse.getConfig();
+      setConfig(updated ?? {});
+    } else {
+      setStatus(key, "❌ " + (result.error ?? "Connection failed"));
+    }
+    setLoad(key, false);
+  }
+
+  async function connectShopify() {
+    const store = (fieldVals["shopify-store"] ?? "").trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const token = (fieldVals["shopify-token"] ?? "").trim();
+    if (!store || !token) { setStatus("shopify", "❌ Enter both store URL and token"); return; }
+    setLoad("shopify", true);
+    setStatus("shopify", "Verifying…");
+    const v = pulse?.verifyShopify
+      ? await pulse.verifyShopify(store, token)
+      : { success: true };
+    if (!v.success) {
+      setStatus("shopify", "❌ " + ((v as { error?: string }).error ?? "Invalid credentials"));
+      setLoad("shopify", false);
+      return;
+    }
+    await pulse?.saveConfig({ shopify: { store, token } });
+    const updated = await pulse?.getConfig();
+    setConfig(updated ?? {});
+    setStatus("shopify", "✓ Connected" + ((v as { shopName?: string }).shopName ? " — " + (v as { shopName: string }).shopName : ""));
+    setLoad("shopify", false);
+  }
+
+  async function connectKlaviyo() {
+    const key = (fieldVals["klaviyo-key"] ?? "").trim();
+    if (!key) { setStatus("klaviyo", "❌ Enter your API key"); return; }
+    setLoad("klaviyo", true);
+    setStatus("klaviyo", "Verifying…");
+    const v = pulse?.verifyKlaviyo
+      ? await pulse.verifyKlaviyo(key)
+      : { success: true };
+    if (!v.success) {
+      setStatus("klaviyo", "❌ " + ((v as { error?: string }).error ?? "Invalid key"));
+      setLoad("klaviyo", false);
+      return;
+    }
+    await pulse?.saveConfig({ klaviyo: { apiKey: key } });
+    const updated = await pulse?.getConfig();
+    setConfig(updated ?? {});
+    setStatus("klaviyo", "✓ Connected" + ((v as { orgName?: string }).orgName ? " — " + (v as { orgName: string }).orgName : ""));
+    setLoad("klaviyo", false);
+  }
+
+  function handleConnect(integ: Integration) {
+    if (integ.configType === "oauth") connectOAuth(integ.key);
+    else if (integ.key === "shopify") connectShopify();
+    else if (integ.key === "klaviyo") connectKlaviyo();
+  }
+
+  return (
+    <div style={{ padding: "40px 40px 80px", maxWidth: 860 }}>
+      <div style={{ marginBottom: 36 }}>
+        <h1 style={{ fontSize: 26, fontWeight: 700, color: "#fff", letterSpacing: "-0.5px", marginBottom: 6 }}>
+          Integrations
+        </h1>
+        <p style={{ fontSize: 14, color: "#4a5568" }}>
+          Connect your platforms. Pulse reads data automatically after each connection.
+        </p>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {INTEGRATIONS.map(integ => {
+          const connected = isConnected(integ.key);
+          const busy      = loading[integ.key];
+          const status    = statuses[integ.key];
+
+          return (
+            <div key={integ.key} style={{
+              background: "#0d1526",
+              border: `1px solid ${connected ? "rgba(0,229,204,0.2)" : "#1a2540"}`,
+              borderRadius: 14, padding: "22px 24px",
+            }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
+                {/* Icon */}
+                <div style={{
+                  width: 44, height: 44, borderRadius: 11, flexShrink: 0,
+                  background: integ.iconBg,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 18, fontWeight: 700, color: integ.iconColor,
+                }}>
+                  {integ.icon}
+                </div>
+
+                {/* Info */}
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: "#fff" }}>{integ.name}</span>
+                    {connected && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, color: "#4ade80",
+                        background: "rgba(74,222,128,0.1)", border: "1px solid rgba(74,222,128,0.2)",
+                        padding: "2px 8px", borderRadius: 100,
+                      }}>LIVE</span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: 13, color: "#4a5568", lineHeight: 1.6, marginBottom: integ.fields ? 16 : 0 }}>
+                    {integ.description}
+                  </p>
+
+                  {/* API key fields */}
+                  {integ.fields && !connected && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14, maxWidth: 460 }}>
+                      {integ.fields.map(f => (
+                        <div key={f.id}>
+                          <label style={{ fontSize: 11, fontWeight: 600, color: "#4a5568", textTransform: "uppercase", letterSpacing: "0.5px", display: "block", marginBottom: 5 }}>
+                            {f.label}
+                          </label>
+                          <input
+                            type={f.type ?? "text"}
+                            placeholder={f.placeholder}
+                            value={fieldVals[f.id] ?? ""}
+                            onChange={e => setFieldVals(v => ({ ...v, [f.id]: e.target.value }))}
+                            style={{
+                              width: "100%", background: "#080d1a",
+                              border: "1px solid #1a2540", borderRadius: 8,
+                              padding: "9px 12px", fontSize: 13, color: "#e2e8f0",
+                              outline: "none", fontFamily: "inherit",
+                            }}
+                          />
+                        </div>
+                      ))}
+                      {integ.helpUrl && (
+                        <button
+                          onClick={() => pulse?.openExternal(integ.helpUrl!)}
+                          style={{ background: "none", border: "none", color: "#00e5cc", fontSize: 12, cursor: "pointer", textAlign: "left", padding: 0 }}
+                        >
+                          How to get your token →
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Status message */}
+                  {status && (
+                    <div style={{
+                      fontSize: 12, fontWeight: 500, marginBottom: 10,
+                      color: status.startsWith("✓") ? "#4ade80" : status.startsWith("❌") ? "#f87171" : "#94a3b8",
+                    }}>
+                      {status}
+                    </div>
+                  )}
+
+                  {/* Action button */}
+                  <button
+                    onClick={() => handleConnect(integ)}
+                    disabled={busy || connected}
+                    style={{
+                      padding: "9px 18px", borderRadius: 8,
+                      background: connected ? "rgba(74,222,128,0.08)" : "#00e5cc",
+                      border: connected ? "1px solid rgba(74,222,128,0.2)" : "none",
+                      color: connected ? "#4ade80" : "#080d1a",
+                      fontSize: 13, fontWeight: 700, fontFamily: "inherit",
+                      cursor: busy || connected ? "default" : "pointer",
+                      opacity: busy ? 0.7 : 1,
+                    }}
+                  >
+                    {busy ? "Connecting…" : connected ? "✓ Connected" : integ.configType === "oauth" ? `Connect ${integ.name.split(" ")[0]}` : "Save & Verify"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

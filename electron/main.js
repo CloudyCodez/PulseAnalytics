@@ -7,6 +7,7 @@ const {
   shell,
   utilityProcess,
   ipcMain,
+  session,
 } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
@@ -24,19 +25,26 @@ const DEV_PORT = parseInt(process.env.ELECTRON_DEV_PORT || "3001", 10);
 const PREFERRED_PORT = 3000;
 let activePort = PREFERRED_PORT;
 
+// ─── This header is how the middleware knows a request comes from the Electron
+//     app. It is injected at the session level so every single request the app
+//     makes — including page navigations, API calls, and asset fetches — carries
+//     it automatically. The middleware blocks any app-only route that arrives
+//     without this header, so typing the URL into a browser does nothing.
+const ELECTRON_HEADER_NAME  = "x-pulse-client";
+const ELECTRON_HEADER_VALUE = "electron";
+
 // ─── Process handles ─────────────────────────────────────────────────────────
-let nextProcess = null;
+let nextProcess   = null;
 let ollamaProcess = null;
 
 // ─── Windows ──────────────────────────────────────────────────────────────────
-let mainWindow = null;
+let mainWindow   = null;
 let loadingWindow = null;
-let setupWindow = null;
-let tray = null;
-let appQuitting = false;
+let setupWindow  = null;
+let tray         = null;
+let appQuitting  = false;
 
 // ─── On-disk config store ─────────────────────────────────────────────────────
-// Stored at %APPDATA%/Pulse/config.json (Windows) or ~/Library/... (mac)
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 
 function readConfig() {
@@ -53,7 +61,7 @@ function readConfig() {
 function writeConfig(data) {
   try {
     const existing = readConfig();
-    const merged = deepMerge(existing, data);
+    const merged   = deepMerge(existing, data);
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), "utf8");
     return merged;
   } catch (e) {
@@ -65,11 +73,7 @@ function writeConfig(data) {
 function deepMerge(target, source) {
   const out = { ...target };
   for (const key of Object.keys(source)) {
-    if (
-      source[key] &&
-      typeof source[key] === "object" &&
-      !Array.isArray(source[key])
-    ) {
+    if (source[key] && typeof source[key] === "object" && !Array.isArray(source[key])) {
       out[key] = deepMerge(out[key] || {}, source[key]);
     } else {
       out[key] = source[key];
@@ -79,11 +83,21 @@ function deepMerge(target, source) {
 }
 
 function isSetupComplete() {
-  const cfg = readConfig();
-  return cfg.setupComplete === true;
+  return readConfig().setupComplete === true;
 }
 
-// ─── CRITICAL: Single-instance lock ──────────────────────────────────────────
+// ─── Inject x-pulse-client header on every outgoing request ───────────────────
+// This runs once after app is ready, before any window opens. It intercepts
+// every HTTP request made by any BrowserWindow and appends the header.
+// The Next.js middleware checks for this header to allow access to app-only routes.
+function installElectronHeader() {
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    details.requestHeaders[ELECTRON_HEADER_NAME] = ELECTRON_HEADER_VALUE;
+    callback({ requestHeaders: details.requestHeaders });
+  });
+}
+
+// ─── Single-instance lock ─────────────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -129,7 +143,7 @@ function waitForNextJS(port, retries = 60) {
   });
 }
 
-// ─── Ollama ───────────────────────────────────────────────────────────────────
+// ─── Ollama (internal — never exposed to user) ────────────────────────────────
 function findOllamaBinary() {
   const candidates =
     process.platform === "win32"
@@ -140,9 +154,7 @@ function findOllamaBinary() {
         ]
       : ["/usr/local/bin/ollama", "/usr/bin/ollama"];
   for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return c;
-    } catch {}
+    try { if (fs.existsSync(c)) return c; } catch {}
   }
   return process.platform === "win32" ? "ollama.exe" : "ollama";
 }
@@ -150,20 +162,20 @@ function findOllamaBinary() {
 function startOllama() {
   return new Promise((resolve) => {
     const req = http.get("http://localhost:11434", () => {
-      console.log("[Pulse] Ollama already running.");
+      console.log("[Pulse] AI engine already running.");
       resolve();
     });
     req.on("error", () => {
       const binary = findOllamaBinary();
-      console.log(`[Pulse] Starting Ollama: ${binary}`);
+      console.log("[Pulse] Starting AI engine…");
       ollamaProcess = spawn(binary, ["serve"], {
         detached: false,
-        stdio: "ignore",
-        shell: false,
-        env: { ...process.env },
+        stdio:    "ignore",
+        shell:    false,
+        env:      { ...process.env },
       });
       ollamaProcess.on("error", (err) => {
-        console.warn("[Pulse] Ollama failed to start:", err.message);
+        console.warn("[Pulse] AI engine failed to start:", err.message);
         resolve();
       });
       setTimeout(resolve, 4000);
@@ -172,17 +184,192 @@ function startOllama() {
   });
 }
 
+/**
+ * Install Ollama silently and pull the model.
+ * Reports progress back via progressCb({ pct, label }) — labels are
+ * Pulse-branded, never mentioning Ollama or llama3.1 to the user.
+ */
+function installAndPullOllama(progressCb) {
+  return new Promise(async (resolve) => {
+    const sendProgress = (pct, label) => {
+      try { progressCb && progressCb({ pct, label }); } catch {}
+    };
+
+    // ── Check if already installed ──────────────────────────────────────────
+    sendProgress(5, "Checking Pulse AI…");
+    const binary = findOllamaBinary();
+    const alreadyInstalled = fs.existsSync(binary) || await checkOllamaRunning();
+
+    if (!alreadyInstalled) {
+      // ── Download and silent-install Ollama ────────────────────────────────
+      sendProgress(10, "Downloading Pulse AI…");
+      const installerPath = path.join(os.tmpdir(), "pulse-ai-setup.exe");
+
+      try {
+        await downloadFile(
+          "https://ollama.com/download/OllamaSetup.exe",
+          installerPath,
+          (pct) => sendProgress(10 + Math.round(pct * 0.3), "Downloading Pulse AI…")
+        );
+        sendProgress(40, "Installing Pulse AI…");
+        await runSilentInstaller(installerPath);
+        sendProgress(50, "Finalising installation…");
+        await new Promise(r => setTimeout(r, 4000)); // let installer finish
+      } catch (err) {
+        console.error("[Pulse AI] Install failed:", err.message);
+        return resolve({ success: false, error: "Installation failed. Please try again." });
+      }
+    } else {
+      sendProgress(50, "Pulse AI found — loading model…");
+    }
+
+    // ── Start the Ollama server ────────────────────────────────────────────
+    await startOllama();
+    sendProgress(55, "Starting Pulse AI engine…");
+    await new Promise(r => setTimeout(r, 2000));
+
+    // ── Pull llama3.1 model ───────────────────────────────────────────────
+    // Check if model already downloaded
+    const modelExists = await checkModelExists("llama3.1");
+    if (modelExists) {
+      sendProgress(100, "Pulse AI is ready");
+      return resolve({ success: true });
+    }
+
+    sendProgress(58, "Preparing AI model (this is a one-time download)…");
+
+    try {
+      await pullModel("llama3.1", (pct, detail) => {
+        // Map 0–100 of pull to 58–98 of overall progress
+        const overall = 58 + Math.round(pct * 0.4);
+        sendProgress(overall, detail || "Downloading AI model…");
+      });
+      sendProgress(100, "Pulse AI is ready");
+      resolve({ success: true });
+    } catch (err) {
+      console.error("[Pulse AI] Model pull failed:", err.message);
+      resolve({ success: false, error: "Could not load AI model. Check your connection and try again." });
+    }
+  });
+}
+
+function checkOllamaRunning() {
+  return new Promise((resolve) => {
+    const req = http.get("http://localhost:11434", () => resolve(true));
+    req.on("error", () => resolve(false));
+    req.end();
+  });
+}
+
+function checkModelExists(modelName) {
+  return new Promise((resolve) => {
+    const req = http.get("http://localhost:11434/api/tags", (res) => {
+      let body = "";
+      res.on("data", d => body += d);
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          const models = (data.models || []).map(m => m.name);
+          resolve(models.some(m => m.includes(modelName)));
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+    req.on("error", () => resolve(false));
+    req.end();
+  });
+}
+
+function downloadFile(fileUrl, destPath, onProgress) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    https.get(fileUrl, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        file.close();
+        return downloadFile(res.headers.location, destPath, onProgress).then(resolve).catch(reject);
+      }
+      const total = parseInt(res.headers["content-length"] || "0", 10);
+      let downloaded = 0;
+      res.on("data", chunk => {
+        downloaded += chunk.length;
+        if (total > 0 && onProgress) onProgress(downloaded / total);
+      });
+      res.pipe(file);
+      file.on("finish", () => { file.close(); resolve(); });
+    }).on("error", (err) => {
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
+}
+
+function runSilentInstaller(installerPath) {
+  return new Promise((resolve, reject) => {
+    // /S = silent install for NSIS-based Ollama installer
+    const proc = spawn(installerPath, ["/S"], { detached: false, stdio: "ignore", shell: false });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Installer exited with code ${code}`));
+    });
+    proc.on("error", reject);
+  });
+}
+
+function pullModel(modelName, onProgress) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify({ name: modelName, stream: true });
+    const options = {
+      hostname: "127.0.0.1",
+      port: 11434,
+      path: "/api/pull",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(postData),
+      },
+    };
+
+    const req = http.request(options, (res) => {
+      let buffer = "";
+      res.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // keep incomplete line
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            if (obj.total && obj.completed) {
+              const pct = Math.round((obj.completed / obj.total) * 100);
+              onProgress && onProgress(pct, null);
+            }
+            if (obj.status === "success") {
+              resolve();
+            }
+          } catch {}
+        }
+      });
+      res.on("end", () => resolve());
+    });
+
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
 // ─── Next.js via utilityProcess ───────────────────────────────────────────────
 function startNextJS(port) {
   return new Promise((resolve, reject) => {
     const standalonePath = path.join(process.resourcesPath, "standalone");
-    const serverScript = path.join(standalonePath, "server.js");
+    const serverScript   = path.join(standalonePath, "server.js");
 
     if (!fs.existsSync(serverScript)) {
       return reject(new Error(`server.js not found at: ${serverScript}`));
     }
 
-    console.log(`[Pulse] Starting Next.js via utilityProcess on port ${port}`);
+    console.log(`[Pulse] Starting Next.js on port ${port}`);
 
     nextProcess = utilityProcess.fork(serverScript, [], {
       cwd: standalonePath,
@@ -215,12 +402,9 @@ function startNextJS(port) {
       });
     }
     nextProcess.on("exit", (code) => {
-      console.log(`[Next] exited: ${code}`);
       if (!resolved) reject(new Error(`Next.js exited with code ${code}`));
     });
-    setTimeout(() => {
-      if (!resolved) { resolved = true; resolve(); }
-    }, 25000);
+    setTimeout(() => { if (!resolved) { resolved = true; resolve(); } }, 25000);
   });
 }
 
@@ -238,13 +422,9 @@ function loadIcon() {
 // ─── Loading window ───────────────────────────────────────────────────────────
 function createLoadingWindow() {
   loadingWindow = new BrowserWindow({
-    width: 420,
-    height: 280,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    center: true,
-    alwaysOnTop: true,
+    width: 420, height: 280,
+    frame: false, transparent: true, resizable: false,
+    center: true, alwaysOnTop: true,
     webPreferences: { nodeIntegration: false },
   });
   loadingWindow.loadFile(path.join(__dirname, "loading.html"));
@@ -261,14 +441,10 @@ function closeLoading() {
 function createSetupWindow() {
   const icon = loadIcon();
   setupWindow = new BrowserWindow({
-    width: 820,
-    height: 560,
-    minWidth: 720,
-    minHeight: 480,
-    resizable: true,
-    center: true,
-    show: false,
-    title: "Pulse Setup",
+    width: 860, height: 580,
+    minWidth: 720, minHeight: 480,
+    resizable: true, center: true,
+    show: false, title: "Pulse Setup",
     backgroundColor: "#0a0f1e",
     ...(icon ? { icon } : {}),
     webPreferences: {
@@ -286,27 +462,23 @@ function createSetupWindow() {
     setupWindow.focus();
   });
 
-  // Prevent closing the setup window from quitting the app
   setupWindow.on("close", (e) => {
-    if (!appQuitting) {
-      // Only allow close if main window is open (setup was completed)
-      if (!mainWindow || mainWindow.isDestroyed()) {
-        e.preventDefault(); // Can't exit without completing or quitting via menu
-      }
+    if (!appQuitting && (!mainWindow || mainWindow.isDestroyed())) {
+      e.preventDefault();
     }
   });
 }
 
-// ─── Main window ──────────────────────────────────────────────────────────────
+// ─── Main app window ──────────────────────────────────────────────────────────
+// Loads /app — the Electron-only analytics dashboard.
+// The middleware blocks /app from any browser request that lacks the
+// x-pulse-client header, so this URL is unreachable outside the EXE.
 function createMainWindow(port) {
   const icon = loadIcon();
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 900,
-    minHeight: 600,
-    show: false,
-    title: "Pulse",
+    width: 1280, height: 820,
+    minWidth: 960, minHeight: 620,
+    show: false, title: "Pulse",
     backgroundColor: "#0a0f1e",
     ...(icon ? { icon } : {}),
     webPreferences: {
@@ -316,11 +488,10 @@ function createMainWindow(port) {
     },
   });
 
-  mainWindow.loadURL(`http://localhost:${port}/dashboard`);
+  mainWindow.loadURL(`http://localhost:${port}/app`);
 
   mainWindow.once("ready-to-show", () => {
     closeLoading();
-    // Close setup window if it's still open
     if (setupWindow && !setupWindow.isDestroyed()) {
       setupWindow.close();
       setupWindow = null;
@@ -336,6 +507,7 @@ function createMainWindow(port) {
     }
   });
 
+  // External links open in system browser, never inside the app
   mainWindow.webContents.setWindowOpenHandler(({ url: openUrl }) => {
     shell.openExternal(openUrl);
     return { action: "deny" };
@@ -345,12 +517,10 @@ function createMainWindow(port) {
 // ─── System tray ──────────────────────────────────────────────────────────────
 function createTray() {
   const icon = loadIcon();
-  const trayIcon = icon
-    ? icon.resize({ width: 16, height: 16 })
-    : nativeImage.createEmpty();
+  const trayIcon = icon ? icon.resize({ width: 16, height: 16 }) : nativeImage.createEmpty();
 
   tray = new Tray(trayIcon);
-  tray.setToolTip("Pulse Analytics");
+  tray.setToolTip("Pulse");
 
   const menu = Menu.buildFromTemplate([
     {
@@ -361,10 +531,7 @@ function createTray() {
       },
     },
     { type: "separator" },
-    {
-      label: "Quit Pulse",
-      click: () => { appQuitting = true; app.quit(); },
-    },
+    { label: "Quit Pulse", click: () => { appQuitting = true; app.quit(); } },
   ]);
 
   tray.setContextMenu(menu);
@@ -375,96 +542,59 @@ function createTray() {
 }
 
 // ─── OAuth redirect-catcher ───────────────────────────────────────────────────
-// Opens the system browser at the provider's auth URL.
-// Spins up a temporary localhost HTTP server to catch the OAuth redirect.
-// The redirect URI registered with Google/Meta must match this local address.
-
-const OAUTH_REDIRECT_PORT = 9988; // fixed port; register this in your OAuth app console
-const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_REDIRECT_PORT}/callback`;
+const OAUTH_REDIRECT_PORT = 9988;
+const OAUTH_REDIRECT_URI  = `http://localhost:${OAUTH_REDIRECT_PORT}/callback`;
 
 function buildGoogleAuthUrl(state) {
-  // Reads GOOGLE_CLIENT_ID from .env.local / bundled env at build time
   const clientId = process.env.GOOGLE_CLIENT_ID || "";
   const scopes = [
     "https://www.googleapis.com/auth/adwords",
     "https://www.googleapis.com/auth/analytics.readonly",
-    "openid",
-    "email",
+    "openid", "email",
   ].join(" ");
-
   const params = new url.URLSearchParams({
-    client_id: clientId,
-    redirect_uri: OAUTH_REDIRECT_URI,
-    response_type: "code",
-    scope: scopes,
-    access_type: "offline",
-    prompt: "consent",
-    state,
+    client_id: clientId, redirect_uri: OAUTH_REDIRECT_URI,
+    response_type: "code", scope: scopes,
+    access_type: "offline", prompt: "consent", state,
   });
   return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 }
 
 function buildMetaAuthUrl(state) {
-  const appId = process.env.META_APP_ID || "";
+  const appId  = process.env.META_APP_ID || "";
   const scopes = "ads_read,ads_management,read_insights,email";
   const params = new url.URLSearchParams({
-    client_id: appId,
-    redirect_uri: OAUTH_REDIRECT_URI,
-    response_type: "code",
-    scope: scopes,
-    state,
+    client_id: appId, redirect_uri: OAUTH_REDIRECT_URI,
+    response_type: "code", scope: scopes, state,
   });
   return `https://www.facebook.com/v20.0/dialog/oauth?${params}`;
 }
 
-/**
- * Exchange authorization code with the Next.js app's own API route,
- * which handles token exchange + Supabase persistence.
- * We forward the code to /api/integrations/{provider}/callback so the
- * existing server-side logic (exchangeCode, encrypt, supabase.upsert) runs.
- */
 async function forwardCodeToApp(provider, code, userId) {
   return new Promise((resolve, reject) => {
-    const cbPath =
-      provider === "google"
-        ? `/api/integrations/google/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`
-        : `/api/integrations/meta/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
+    const cbPath = provider === "google"
+      ? `/api/integrations/google/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`
+      : `/api/integrations/meta/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
 
-    const reqOptions = {
-      hostname: "127.0.0.1",
-      port: activePort,
-      path: cbPath,
-      method: "GET",
-    };
-
-    const req = http.request(reqOptions, (res) => {
-      // Redirect means success — Next.js callback redirects to /dashboard/integrations?connected=...
-      if (res.statusCode === 302 || res.statusCode === 301 || res.statusCode === 200) {
+    const req = http.request(
+      { hostname: "127.0.0.1", port: activePort, path: cbPath, method: "GET" },
+      (res) => {
         const location = res.headers.location || "";
-        if (location.includes("error=")) {
-          reject(new Error("Server rejected OAuth code"));
-        } else {
+        if ((res.statusCode >= 200 && res.statusCode < 400) && !location.includes("error=")) {
           resolve(true);
+        } else {
+          reject(new Error("Server rejected OAuth code"));
         }
-      } else {
-        reject(new Error(`Unexpected status ${res.statusCode} from callback`));
+        res.resume();
       }
-      // Drain
-      res.resume();
-    });
+    );
     req.on("error", reject);
     req.end();
   });
 }
 
-/**
- * Start an OAuth flow for the given provider.
- * Returns { success: boolean, error?: string }
- */
 function startOAuthFlow(provider) {
   return new Promise((resolve) => {
-    // state = random nonce; in a real flow you'd also use this to tie to a Clerk session.
-    // For first-run setup we use a simple placeholder since the user isn't signed in yet.
     const state = crypto.randomBytes(16).toString("hex");
     let redirectServer = null;
     let settled = false;
@@ -476,165 +606,183 @@ function startOAuthFlow(provider) {
       resolve(result);
     }
 
-    // Build the provider auth URL
-    const authUrl =
-      provider === "google"
-        ? buildGoogleAuthUrl(state)
-        : buildMetaAuthUrl(state);
+    const authUrl = provider === "google" ? buildGoogleAuthUrl(state) : buildMetaAuthUrl(state);
+    shell.openExternal(authUrl).catch((err) => finish({ success: false, error: "Could not open browser: " + err.message }));
 
-    // Open system browser
-    shell.openExternal(authUrl).catch((err) => {
-      finish({ success: false, error: "Could not open browser: " + err.message });
-      return;
-    });
-
-    // Spin up temporary redirect-catcher
     redirectServer = http.createServer(async (req, res) => {
       const parsed = new url.URL(req.url, `http://localhost:${OAUTH_REDIRECT_PORT}`);
+      if (parsed.pathname !== "/callback") { res.writeHead(404); res.end(); return; }
 
-      if (parsed.pathname !== "/callback") {
-        res.writeHead(404);
-        res.end("Not found");
-        return;
-      }
-
-      const code = parsed.searchParams.get("code");
-      const returnedState = parsed.searchParams.get("state");
+      const code  = parsed.searchParams.get("code");
       const error = parsed.searchParams.get("error");
 
-      if (error) {
-        // Send a friendly close page
+      if (error || !code) {
         res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(closePage("Connection cancelled", `The ${provider} connection was cancelled. You can close this tab.`, false));
-        finish({ success: false, error: `Provider returned: ${error}` });
+        res.end(oauthClosePage(false, provider));
+        finish({ success: false, error: error || "No authorization code" });
         return;
       }
-
-      if (!code) {
-        res.writeHead(400, { "Content-Type": "text/html" });
-        res.end(closePage("Missing code", "OAuth response was missing the authorization code.", false));
-        finish({ success: false, error: "No authorization code in redirect" });
-        return;
-      }
-
-      // For setup wizard we don't have a Clerk userId yet — store the raw tokens
-      // directly via the Next.js API, or save them to disk config for post-setup sync.
-      // We pass a placeholder userId; the Next.js callback will look up the real user
-      // once the user signs in, or you can pass the Clerk userId via state in production.
-      const userId = "setup_pending";
 
       try {
-        await forwardCodeToApp(provider, code, userId);
-        // Save a flag so we know this provider was connected during setup
+        await forwardCodeToApp(provider, code, "setup_pending");
         writeConfig({ [`${provider}_connected`]: true });
         res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(closePage(
-          `${provider === "google" ? "Google" : "Meta"} Connected!`,
-          "You can close this tab and return to Pulse Setup.",
-          true
-        ));
+        res.end(oauthClosePage(true, provider));
         finish({ success: true });
       } catch (err) {
-        console.error(`[OAuth] Forward error (${provider}):`, err.message);
-        // Even if the Next.js forward fails (e.g. user not in DB yet), save the code
-        // to disk config so it can be re-exchanged after sign-in.
+        // Store code for post-sign-in redemption
         writeConfig({ [`${provider}_pending_code`]: code, [`${provider}_connected`]: false });
         res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(closePage(
-          `${provider === "google" ? "Google" : "Meta"} Connected!`,
-          "Your credentials have been saved. You can close this tab and return to Pulse Setup.",
-          true
-        ));
-        // We still resolve as success from the UI perspective — code is stored
+        res.end(oauthClosePage(true, provider));
         finish({ success: true });
       }
     });
 
-    redirectServer.listen(OAUTH_REDIRECT_PORT, "127.0.0.1", () => {
-      console.log(`[OAuth] Redirect server listening on port ${OAUTH_REDIRECT_PORT}`);
-    });
-
-    redirectServer.on("error", (err) => {
-      console.error("[OAuth] Redirect server error:", err.message);
-      finish({ success: false, error: "Could not start local redirect server: " + err.message });
-    });
-
-    // Timeout after 5 minutes
-    setTimeout(() => {
-      finish({ success: false, error: "OAuth timed out — please try again." });
-    }, 5 * 60 * 1000);
+    redirectServer.listen(OAUTH_REDIRECT_PORT, "127.0.0.1");
+    redirectServer.on("error", (err) => finish({ success: false, error: "Could not start redirect listener: " + err.message }));
+    setTimeout(() => finish({ success: false, error: "Connection timed out — please try again." }), 5 * 60 * 1000);
   });
 }
 
-/** Returns a minimal HTML page shown in the browser after OAuth redirect */
-function closePage(title, message, success) {
-  const color = success ? "#00e5cc" : "#f87171";
+function oauthClosePage(success, provider) {
+  const c    = success ? "#00e5cc" : "#f87171";
   const icon = success ? "✓" : "✗";
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8"/>
-  <title>${title}</title>
-  <style>
+  const msg  = success
+    ? `${provider === "google" ? "Google" : "Meta"} connected. You can close this tab.`
+    : "Connection was cancelled. You can close this tab.";
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
     *{margin:0;padding:0;box-sizing:border-box}
-    body{background:#0a0f1e;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-         display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:16px}
-    .icon{width:64px;height:64px;border-radius:50%;background:${color}20;border:2px solid ${color};
-          display:flex;align-items:center;justify-content:center;font-size:28px;color:${color}}
-    h1{font-size:22px;font-weight:700}
-    p{font-size:14px;color:#64748b;text-align:center;max-width:360px;line-height:1.6}
-  </style>
-</head>
-<body>
-  <div class="icon">${icon}</div>
-  <h1>${title}</h1>
-  <p>${message}</p>
-  <script>setTimeout(()=>window.close(),3000)</script>
-</body>
-</html>`;
+    body{background:#0a0f1e;color:#fff;font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:14px}
+    .i{width:56px;height:56px;border-radius:50%;background:${c}20;border:2px solid ${c};display:flex;align-items:center;justify-content:center;font-size:24px;color:${c}}
+    h1{font-size:18px;font-weight:700}p{font-size:13px;color:#64748b;text-align:center;max-width:320px}
+  </style></head><body>
+    <div class="i">${icon}</div><h1>Pulse</h1><p>${msg}</p>
+    <script>setTimeout(()=>window.close(),2500)</script>
+  </body></html>`;
+}
+
+// ─── Shopify verification ─────────────────────────────────────────────────────
+async function verifyShopifyToken(store, token) {
+  return new Promise((resolve) => {
+    const hostname = store.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const options = {
+      hostname,
+      path: "/admin/api/2024-01/shop.json",
+      method: "GET",
+      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
+    };
+    const req = https.request(options, (res) => {
+      let body = "";
+      res.on("data", d => body += d);
+      res.on("end", () => {
+        if (res.statusCode === 200) {
+          try {
+            const data = JSON.parse(body);
+            resolve({ success: true, shopName: data.shop?.name || hostname });
+          } catch {
+            resolve({ success: true, shopName: hostname });
+          }
+        } else if (res.statusCode === 401 || res.statusCode === 403) {
+          resolve({ success: false, error: "Invalid access token — check it was copied correctly." });
+        } else {
+          resolve({ success: false, error: `Shopify returned status ${res.statusCode}. Check your store URL.` });
+        }
+      });
+    });
+    req.on("error", (err) => resolve({ success: false, error: "Could not reach Shopify: " + err.message }));
+    req.end();
+  });
+}
+
+// ─── Klaviyo verification ─────────────────────────────────────────────────────
+async function verifyKlaviyoKey(apiKey) {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: "a.klaviyo.com",
+      path: "/api/accounts/",
+      method: "GET",
+      headers: {
+        "Authorization": `Klaviyo-API-Key ${apiKey}`,
+        "revision": "2024-02-15",
+        "Accept": "application/json",
+      },
+    };
+    const req = https.request(options, (res) => {
+      let body = "";
+      res.on("data", d => body += d);
+      res.on("end", () => {
+        if (res.statusCode === 200) {
+          try {
+            const data = JSON.parse(body);
+            const orgName = data.data?.[0]?.attributes?.contact_information?.organization_name || "";
+            resolve({ success: true, orgName });
+          } catch {
+            resolve({ success: true, orgName: "" });
+          }
+        } else if (res.statusCode === 401 || res.statusCode === 403) {
+          resolve({ success: false, error: "Invalid API key — make sure it has read access." });
+        } else {
+          resolve({ success: false, error: `Klaviyo returned status ${res.statusCode}.` });
+        }
+      });
+    });
+    req.on("error", (err) => resolve({ success: false, error: "Could not reach Klaviyo: " + err.message }));
+    req.end();
+  });
 }
 
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
 
-// OAuth start (invoked by setup.html)
-ipcMain.handle("oauth:start", async (_event, provider) => {
-  console.log(`[IPC] oauth:start → ${provider}`);
+ipcMain.handle("oauth:start", async (_e, provider) => {
   try {
     const result = await startOAuthFlow(provider);
-    // Also push result as an event so listeners (onOAuthResult) receive it
     const win = setupWindow || mainWindow;
-    if (win && !win.isDestroyed()) {
-      win.webContents.send("oauth:result", { provider, ...result });
-    }
+    if (win && !win.isDestroyed()) win.webContents.send("oauth:result", { provider, ...result });
     return result;
   } catch (err) {
     return { success: false, error: String(err.message || err) };
   }
 });
 
-// Config save (used by Shopify step)
-ipcMain.handle("config:save", async (_event, values) => {
+ipcMain.handle("oauth:redeem", async (_e, provider, userId) => {
   try {
-    const merged = writeConfig(values);
-    return { success: true, config: merged };
+    const cfg = readConfig();
+    const pendingCode = cfg[`${provider}_pending_code`];
+    if (!pendingCode) return { success: true, skipped: true };
+    await forwardCodeToApp(provider, pendingCode, userId);
+    writeConfig({ [`${provider}_pending_code`]: null, [`${provider}_connected`]: true });
+    return { success: true, skipped: false };
   } catch (err) {
     return { success: false, error: String(err.message || err) };
   }
 });
 
-// Config get
-ipcMain.handle("config:get", async (_event, key) => {
-  const cfg = readConfig();
-  if (!key) return cfg;
-  // Support dotted keys e.g. "shopify.store"
-  return key.split(".").reduce((obj, k) => (obj && obj[k] !== undefined ? obj[k] : null), cfg);
+ipcMain.handle("config:save", async (_e, values) => {
+  try   { return { success: true, config: writeConfig(values) }; }
+  catch (err) { return { success: false, error: String(err.message || err) }; }
 });
 
-// Setup complete — mark done, open main window
+ipcMain.handle("config:get", async (_e, key) => {
+  const cfg = readConfig();
+  if (!key) return cfg;
+  return key.split(".").reduce((o, k) => (o && o[k] !== undefined ? o[k] : null), cfg);
+});
+
+// Pulse AI install — completely silent, progress labels are Pulse-branded
+ipcMain.handle("ollama:install", async (_e) => {
+  const win = setupWindow || mainWindow;
+  const sendProgress = (pct, label) => {
+    if (win && !win.isDestroyed()) win.webContents.send("ollama:progress", { pct, label });
+  };
+  return installAndPullOllama(sendProgress);
+});
+
+ipcMain.handle("verify:shopify", async (_e, store, token) => verifyShopifyToken(store, token));
+ipcMain.handle("verify:klaviyo", async (_e, apiKey) => verifyKlaviyoKey(apiKey));
+
 ipcMain.handle("setup:complete", async () => {
   try {
     writeConfig({ setupComplete: true });
-    console.log("[Pulse] Setup complete. Opening main window.");
     createMainWindow(activePort);
     return { success: true };
   } catch (err) {
@@ -642,58 +790,22 @@ ipcMain.handle("setup:complete", async () => {
   }
 });
 
-// Redeem a pending OAuth code that was captured during first-run setup
-// (before the user was signed into Clerk). Called from the desktop dashboard
-// after sign-in, once we know the real Clerk userId.
-ipcMain.handle("oauth:redeem", async (_event, provider, userId) => {
-  console.log(`[IPC] oauth:redeem → ${provider} for user ${userId}`);
-  try {
-    const cfg = readConfig();
-    const pendingCode = cfg[`${provider}_pending_code`];
-    if (!pendingCode) {
-      // Nothing to redeem — integration either already synced or never started
-      return { success: true, skipped: true };
-    }
-
-    await forwardCodeToApp(provider, pendingCode, userId);
-
-    // Clear the pending code and mark connected
-    const update = {};
-    update[`${provider}_pending_code`] = null;
-    update[`${provider}_connected`] = true;
-    writeConfig(update);
-
-    console.log(`[OAuth] Redeemed pending ${provider} code for user ${userId}`);
-    return { success: true, skipped: false };
-  } catch (err) {
-    console.error(`[OAuth] Redeem error (${provider}):`, err.message);
-    return { success: false, error: String(err.message || err) };
-  }
-});
-
-// Shell open external
-ipcMain.handle("shell:openExternal", async (_event, targetUrl) => {
-  try {
-    await shell.openExternal(targetUrl);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: String(err.message || err) };
-  }
+ipcMain.handle("shell:openExternal", async (_e, targetUrl) => {
+  try   { await shell.openExternal(targetUrl); return { success: true }; }
+  catch (err) { return { success: false, error: String(err.message || err) }; }
 });
 
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 function cleanup() {
   appQuitting = true;
-  if (nextProcess) {
-    try { nextProcess.kill(); } catch {}
-  }
-  if (ollamaProcess && !ollamaProcess.killed) {
-    try { ollamaProcess.kill(); } catch {}
-  }
+  try { nextProcess && nextProcess.kill(); } catch {}
+  try { ollamaProcess && !ollamaProcess.killed && ollamaProcess.kill(); } catch {}
 }
 
 // ─── App lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  // Install the Electron identity header before any window opens
+  installElectronHeader();
   createLoadingWindow();
 
   try {
@@ -704,7 +816,6 @@ app.whenReady().then(async () => {
       await waitForNextJS(activePort);
     } else {
       activePort = await findAvailablePort(PREFERRED_PORT);
-      console.log(`[Pulse] Using port ${activePort}`);
       await startOllama();
       await startNextJS(activePort);
       await waitForNextJS(activePort);
@@ -712,34 +823,25 @@ app.whenReady().then(async () => {
 
     createTray();
 
-    // ── First-run check ──────────────────────────────────────────────────────
     if (isSetupComplete()) {
-      console.log("[Pulse] Setup already complete — opening main window.");
       createMainWindow(activePort);
     } else {
-      console.log("[Pulse] First run detected — opening setup wizard.");
       createSetupWindow();
     }
 
   } catch (err) {
     console.error("[Pulse] Startup error:", err);
     if (loadingWindow && !loadingWindow.isDestroyed()) {
-      loadingWindow.webContents
-        .executeJavaScript(
-          `document.getElementById('status').textContent = 'Startup failed: ${String(err.message).replace(/['"\\]/g, "")}'`
-        )
-        .catch(() => {});
+      loadingWindow.webContents.executeJavaScript(
+        `document.getElementById('status').textContent = 'Startup failed: ${String(err.message).replace(/['"\\]/g, "")}'`
+      ).catch(() => {});
     }
   }
 });
 
 app.on("before-quit", cleanup);
 app.on("will-quit", cleanup);
-
-app.on("window-all-closed", () => {
-  // Keep alive via tray on all platforms
-});
-
+app.on("window-all-closed", () => { /* stay alive in tray */ });
 app.on("activate", () => {
   const win = mainWindow || setupWindow;
   if (win) { win.show(); win.focus(); }
