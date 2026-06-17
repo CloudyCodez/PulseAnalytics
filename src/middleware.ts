@@ -20,7 +20,7 @@ function mockMiddleware(_req: NextRequest) {
   return NextResponse.next();
 }
 
-const liveMiddleware = clerkMiddleware(async (auth, req) => {
+const liveMiddleware = clerkMiddleware((auth, req) => {
   // Block browser access to /app — only Electron can reach it
   if (isElectronOnlyRoute(req)) {
     const clientHeader = req.headers.get("x-pulse-client");
@@ -32,7 +32,7 @@ const liveMiddleware = clerkMiddleware(async (auth, req) => {
 
   // Protect non-public routes
   if (!isPublicRoute(req)) {
-    await auth.protect();
+    auth().protect();
   }
 
   return NextResponse.next();
