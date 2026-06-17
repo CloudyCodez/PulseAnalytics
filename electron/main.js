@@ -545,15 +545,22 @@ function createTray() {
 const OAUTH_REDIRECT_PORT = 9988;
 const OAUTH_REDIRECT_URI  = `http://localhost:${OAUTH_REDIRECT_PORT}/callback`;
 
+// ─── OAuth credentials ────────────────────────────────────────────────────────
+// These are the Pulse platform OAuth app credentials — public values that
+// identify YOUR Google Cloud / Meta app to their OAuth servers.
+// They are the same for every client install. Each client's tokens are what
+// vary and get stored locally after their individual OAuth flow completes.
+const GOOGLE_CLIENT_ID = "392683699806-sojhci4aojm3qnjovcom4d5rb9p8fpio.apps.googleusercontent.com";
+const META_APP_ID      = ""; // fill in once Meta app is set up
+
 function buildGoogleAuthUrl(state) {
-  const clientId = process.env.GOOGLE_CLIENT_ID || "";
   const scopes = [
     "https://www.googleapis.com/auth/adwords",
     "https://www.googleapis.com/auth/analytics.readonly",
     "openid", "email",
   ].join(" ");
   const params = new url.URLSearchParams({
-    client_id: clientId, redirect_uri: OAUTH_REDIRECT_URI,
+    client_id: GOOGLE_CLIENT_ID, redirect_uri: OAUTH_REDIRECT_URI,
     response_type: "code", scope: scopes,
     access_type: "offline", prompt: "consent", state,
   });
@@ -561,10 +568,9 @@ function buildGoogleAuthUrl(state) {
 }
 
 function buildMetaAuthUrl(state) {
-  const appId  = process.env.META_APP_ID || "";
   const scopes = "ads_read,ads_management,read_insights,email";
   const params = new url.URLSearchParams({
-    client_id: appId, redirect_uri: OAUTH_REDIRECT_URI,
+    client_id: META_APP_ID, redirect_uri: OAUTH_REDIRECT_URI,
     response_type: "code", scope: scopes, state,
   });
   return `https://www.facebook.com/v20.0/dialog/oauth?${params}`;
