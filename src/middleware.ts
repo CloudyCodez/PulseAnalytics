@@ -4,7 +4,6 @@ import type { NextRequest } from "next/server";
 
 const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK_MODE === "true";
 
-// Routes always public — no auth needed
 const isPublicRoute = createRouteMatcher([
   "/",
   "/sign-in(.*)",
@@ -15,8 +14,6 @@ const isPublicRoute = createRouteMatcher([
   "/api/stripe/checkout(.*)",
 ]);
 
-// Routes ONLY accessible from the Electron app (x-pulse-client: electron header)
-// If this header is absent, redirect to /dashboard — browser can't reach /app
 const isElectronOnlyRoute = createRouteMatcher(["/app(.*)"]);
 
 function mockMiddleware(_req: NextRequest) {
@@ -24,22 +21,21 @@ function mockMiddleware(_req: NextRequest) {
 }
 
 const liveMiddleware = clerkMiddleware(async (auth, req) => {
-  // ── Block browser access to /app routes ───────────────────────────────────
+  // Block browser access to /app — only Electron can reach it
   if (isElectronOnlyRoute(req)) {
     const clientHeader = req.headers.get("x-pulse-client");
     if (clientHeader !== "electron") {
-      // Not from Electron — redirect to account hub
       return NextResponse.redirect(new URL("/dashboard", req.url));
     }
-    // Electron request — allow through without Clerk auth
-    // (Electron app manages its own session via config.json)
     return NextResponse.next();
   }
 
-  // ── Protect all other non-public routes with Clerk ────────────────────────
+  // Protect non-public routes
   if (!isPublicRoute(req)) {
     await auth.protect();
   }
+
+  return NextResponse.next();
 });
 
 export default MOCK_MODE ? mockMiddleware : liveMiddleware;
