@@ -241,7 +241,7 @@ export default function HomePage() {
         <div className="proof-div"></div>
         <div className="proof-stat"><strong>Every Monday</strong><span>reports land before clients wake up</span></div>
         <div className="proof-div"></div>
-        <div className="proof-stat"><strong>14-day</strong><span>free trial, no card required</span></div>
+        <div className="proof-stat"><strong>14-day</strong><span>free trial on all plans</span></div>
       </div>
 
       {/* HOW IT WORKS */}
@@ -354,7 +354,7 @@ export default function HomePage() {
             <a href="https://buy.stripe.com/dRmfZheoV84p9adgCm6c000" className="plan-cta outline">Start free trial</a>
           </div>
         </div>
-        <p className="pricing-note">14-day free trial on all plans · No credit card required · Cancel anytime</p>
+        <p className="pricing-note">14-day free trial on all plans · Card required at checkout · Cancel anytime</p>
       </section>
 
       {/* TESTIMONIALS */}
@@ -374,7 +374,7 @@ export default function HomePage() {
       <section className="final-cta">
         <div className="final-cta-glow"></div>
         <h2>Stop spending Fridays on reports.<br />Start Monday already done.</h2>
-        <p>Join agencies saving 12–18 hours a month on client reporting. Free for 14 days, no credit card needed.</p>
+        <p>Join agencies saving 12–18 hours a month on client reporting. Free for 14 days — cancel anytime.</p>
         <div className="final-cta-actions">
           <a href="#pricing" className="btn-primary">
             Start your free 14-day trial
@@ -382,7 +382,7 @@ export default function HomePage() {
           </a>
           <a href="/demo" className="btn-secondary">See live demo first</a>
         </div>
-        <p className="no-card-note">No credit card · Cancel anytime · Set up in under 10 minutes</p>
+        <p className="no-card-note">Card required · Cancel anytime · Set up in under 10 minutes</p>
       </section>
 
       {/* FOOTER */}
