@@ -11,7 +11,7 @@ export async function generateCommentary(
     .map(([k, v]) => `${k}: ${typeof v === "number" ? v.toFixed(2) : v}`)
     .join("\n");
 
-  const res = await fetch("http://localhost:11434/api/chat", {
+  const res = await fetch("http://127.0.0.1:11434/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

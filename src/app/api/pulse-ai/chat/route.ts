@@ -18,7 +18,7 @@ import { NextRequest, NextResponse } from "next/server";
  *   { reportMode: true, data: ReportDataSnapshot }
  */
 
-const OLLAMA_URL = "http://localhost:11434/api/chat";
+const OLLAMA_URL = "http://127.0.0.1:11434/api/chat";
 const MODEL      = "llama3.1";
 
 const SYSTEM_PROMPT = `You are Pulse AI — the built-in intelligence engine for Pulse Analytics.
