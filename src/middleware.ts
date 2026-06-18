@@ -17,6 +17,10 @@ const isPublicRoute = createRouteMatcher([
   // must be reachable without an auth handshake. The route itself does its
   // own Supabase lookup and is not a general-purpose endpoint.
   "/api/desktop/verify(.*)",
+  // Electron app API routes — no Clerk session exists in the desktop app
+  "/api/pulse-ai/(.*)",
+  "/api/integrations/(.*)",
+  "/api/reports/(.*)",
   // /app is Electron-only and is never gated by a Clerk session -- the
   // desktop app's setup wizard has no Clerk sign-in step at all, and the
   // x-pulse-client header check below is the real access boundary for it.
