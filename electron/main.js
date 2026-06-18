@@ -174,7 +174,7 @@ function getStoredLicenseEmail() {
 // plain HTTPS call to the deployed Vercel app (NOT the local Next.js child
 // process), since license state lives in production Supabase regardless of
 // which port the local standalone server happens to be bound to.
-const LICENSE_API_URL = "https://www.pulseanalytics.space/api/desktop/verify";
+const LICENSE_API_URL = "https://pulseanalytics.space/api/desktop/verify";
 
 function verifyLicenseEmail(email, targetUrl = LICENSE_API_URL, redirectsLeft = 3) {
   return new Promise((resolve) => {

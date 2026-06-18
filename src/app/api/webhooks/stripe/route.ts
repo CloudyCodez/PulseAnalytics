@@ -80,7 +80,7 @@ async function provisionUser(
   });
 
   // ── Save to Supabase ───────────────────────────────────────────────────────
-  await supabase.from("users").upsert(
+  const { error: upsertError } = await supabase.from("users").upsert(
     {
       clerk_user_id: clerkUser.id,
       email,
@@ -92,6 +92,16 @@ async function provisionUser(
     },
     { onConflict: "email" }
   );
+
+  if (upsertError) {
+    // Log the full error so it shows in Vercel logs — this is the most common
+    // silent failure point (wrong service role key, RLS, missing column, etc.)
+    console.error(`[Stripe] Supabase upsert FAILED for ${email}:`, upsertError.message, upsertError.code, upsertError.details);
+    // Don't return — still send the welcome email so the user isn't left hanging.
+    // They can be manually added to Supabase. The Clerk account is already created.
+  } else {
+    console.log(`[Stripe] Supabase row created/updated for ${email}`);
+  }
 
   // ── Send welcome email via Resend ──────────────────────────────────────────
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://pulseanalytics.space";
