@@ -804,6 +804,8 @@ const OAUTH_REDIRECT_URI  = `http://localhost:${OAUTH_REDIRECT_PORT}/callback`;
 const GOOGLE_CLIENT_ID = "392683699806-sojhci4aojm3qnjovcom4d5rb9p8fpio.apps.googleusercontent.com";
 const META_APP_ID      = ""; // fill in once Meta app is set up
 const SALESFORCE_CLIENT_ID = process.env.SALESFORCE_CLIENT_ID || "";
+const HUBSPOT_CLIENT_ID    = ""; // unused — HubSpot uses private app tokens
+const TIKTOK_APP_ID        = process.env.TIKTOK_APP_ID        || "";
 
 function buildGoogleAuthUrl(state) {
   const scopes = [
@@ -839,13 +841,41 @@ function buildSalesforceAuthUrl(state) {
   return `https://login.salesforce.com/services/oauth2/authorize?${params}`;
 }
 
-async function forwardCodeToApp(provider, code, userId) {
+function buildHubSpotAuthUrl(state, codeChallenge) {
+  const params = new url.URLSearchParams({
+    client_id: HUBSPOT_CLIENT_ID,
+    redirect_uri: OAUTH_REDIRECT_URI,
+    scope: "crm.objects.contacts.read crm.objects.deals.read crm.objects.companies.read",
+    state,
+    response_type: "code",
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+  });
+  return `https://app.hubspot.com/oauth/authorize?${params}`;
+}
+
+function buildTikTokAuthUrl(state) {
+  const params = new url.URLSearchParams({
+    app_id: TIKTOK_APP_ID,
+    redirect_uri: OAUTH_REDIRECT_URI,
+    state,
+    scope: "ad_account:readonly",
+    response_type: "code",
+  });
+  return `https://business-api.tiktok.com/portal/auth?${params}`;
+}
+
+async function forwardCodeToApp(provider, code, userId, codeVerifier) {
   return new Promise((resolve, reject) => {
     let cbPath;
     if (provider === "google") {
       cbPath = `/api/integrations/google/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
     } else if (provider === "salesforce") {
       cbPath = `/api/integrations/salesforce/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
+    } else if (provider === "hubspot") {
+      cbPath = `/api/integrations/hubspot/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}&code_verifier=${encodeURIComponent(codeVerifier || "")}`;
+    } else if (provider === "tiktok") {
+      cbPath = `/api/integrations/tiktok/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
     } else {
       cbPath = `/api/integrations/meta/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
     }
@@ -873,6 +903,14 @@ function startOAuthFlow(provider) {
     let redirectServer = null;
     let settled = false;
 
+    // PKCE for HubSpot OAuth 2.1
+    let codeVerifier = null;
+    let codeChallenge = null;
+    if (provider === "hubspot") {
+      codeVerifier = crypto.randomBytes(32).toString("base64url");
+      codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+    }
+
     function finish(result) {
       if (settled) return;
       settled = true;
@@ -883,6 +921,8 @@ function startOAuthFlow(provider) {
     let authUrl;
     if (provider === "google")           authUrl = buildGoogleAuthUrl(state);
     else if (provider === "salesforce")  authUrl = buildSalesforceAuthUrl(state);
+    else if (provider === "hubspot")     authUrl = buildHubSpotAuthUrl(state, codeChallenge);
+    else if (provider === "tiktok")      authUrl = buildTikTokAuthUrl(state);
     else                                 authUrl = buildMetaAuthUrl(state);
     shell.openExternal(authUrl).catch((err) => finish({ success: false, error: "Could not open browser: " + err.message }));
 
@@ -901,8 +941,8 @@ function startOAuthFlow(provider) {
       }
 
       try {
-        await forwardCodeToApp(provider, code, "setup_pending");
-        // Salesforce connection is confirmed server-side; mark locally too
+        await forwardCodeToApp(provider, code, "setup_pending", codeVerifier);
+        // Salesforce/HubSpot connection is confirmed server-side; mark locally too
         writeConfig({ [`${provider}_connected`]: true });
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(oauthClosePage(true, provider));
@@ -926,7 +966,7 @@ function oauthClosePage(success, provider) {
   const c    = success ? "#00e5cc" : "#f87171";
   const icon = success ? "✓" : "✗";
   const msg  = success
-    ? `${provider === "google" ? "Google" : provider === "salesforce" ? "Salesforce" : "Meta"} connected. You can close this tab.`
+    ? `${{ google: "Google", salesforce: "Salesforce", hubspot: "HubSpot", tiktok: "TikTok Ads" }[provider] ?? "Meta"} connected. You can close this tab.`
     : "Connection was cancelled. You can close this tab.";
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
     *{margin:0;padding:0;box-sizing:border-box}
