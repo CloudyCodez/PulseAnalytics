@@ -803,6 +803,7 @@ const OAUTH_REDIRECT_URI  = `http://localhost:${OAUTH_REDIRECT_PORT}/callback`;
 // vary and get stored locally after their individual OAuth flow completes.
 const GOOGLE_CLIENT_ID = "392683699806-sojhci4aojm3qnjovcom4d5rb9p8fpio.apps.googleusercontent.com";
 const META_APP_ID      = ""; // fill in once Meta app is set up
+const SALESFORCE_CLIENT_ID = process.env.SALESFORCE_CLIENT_ID || "";
 
 function buildGoogleAuthUrl(state) {
   const scopes = [
@@ -827,11 +828,27 @@ function buildMetaAuthUrl(state) {
   return `https://www.facebook.com/v20.0/dialog/oauth?${params}`;
 }
 
+function buildSalesforceAuthUrl(state) {
+  const params = new url.URLSearchParams({
+    client_id: SALESFORCE_CLIENT_ID,
+    redirect_uri: OAUTH_REDIRECT_URI,
+    response_type: "code",
+    scope: "api refresh_token offline_access",
+    state,
+  });
+  return `https://login.salesforce.com/services/oauth2/authorize?${params}`;
+}
+
 async function forwardCodeToApp(provider, code, userId) {
   return new Promise((resolve, reject) => {
-    const cbPath = provider === "google"
-      ? `/api/integrations/google/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`
-      : `/api/integrations/meta/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
+    let cbPath;
+    if (provider === "google") {
+      cbPath = `/api/integrations/google/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
+    } else if (provider === "salesforce") {
+      cbPath = `/api/integrations/salesforce/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
+    } else {
+      cbPath = `/api/integrations/meta/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(userId)}`;
+    }
 
     const req = http.request(
       { hostname: "127.0.0.1", port: activePort, path: cbPath, method: "GET" },
@@ -863,7 +880,10 @@ function startOAuthFlow(provider) {
       resolve(result);
     }
 
-    const authUrl = provider === "google" ? buildGoogleAuthUrl(state) : buildMetaAuthUrl(state);
+    let authUrl;
+    if (provider === "google")           authUrl = buildGoogleAuthUrl(state);
+    else if (provider === "salesforce")  authUrl = buildSalesforceAuthUrl(state);
+    else                                 authUrl = buildMetaAuthUrl(state);
     shell.openExternal(authUrl).catch((err) => finish({ success: false, error: "Could not open browser: " + err.message }));
 
     redirectServer = http.createServer(async (req, res) => {
@@ -882,6 +902,7 @@ function startOAuthFlow(provider) {
 
       try {
         await forwardCodeToApp(provider, code, "setup_pending");
+        // Salesforce connection is confirmed server-side; mark locally too
         writeConfig({ [`${provider}_connected`]: true });
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(oauthClosePage(true, provider));
@@ -905,7 +926,7 @@ function oauthClosePage(success, provider) {
   const c    = success ? "#00e5cc" : "#f87171";
   const icon = success ? "✓" : "✗";
   const msg  = success
-    ? `${provider === "google" ? "Google" : "Meta"} connected. You can close this tab.`
+    ? `${provider === "google" ? "Google" : provider === "salesforce" ? "Salesforce" : "Meta"} connected. You can close this tab.`
     : "Connection was cancelled. You can close this tab.";
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
     *{margin:0;padding:0;box-sizing:border-box}

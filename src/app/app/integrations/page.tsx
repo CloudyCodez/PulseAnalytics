@@ -9,9 +9,10 @@ type Integration = {
   icon: string;
   iconBg: string;
   iconColor: string;
-  configType: "oauth" | "apikey";
+  configType: "oauth" | "apikey" | "webhook";
   fields?: { id: string; label: string; placeholder: string; type?: string }[];
   helpUrl?: string;
+  badge?: string;
 };
 
 const INTEGRATIONS: Integration[] = [
@@ -60,6 +61,30 @@ const INTEGRATIONS: Integration[] = [
     ],
     helpUrl: "https://developers.klaviyo.com/en/docs/retrieve_api_credentials",
   },
+  {
+    key: "slack",
+    name: "Slack",
+    description: "Get performance alerts, anomaly notifications, and weekly report summaries posted directly to your Slack channel.",
+    icon: "#",
+    iconBg: "rgba(74,21,75,0.2)",
+    iconColor: "#E01E5A",
+    configType: "webhook",
+    fields: [
+      { id: "slack-webhook", label: "Incoming Webhook URL", placeholder: "https://hooks.slack.com/services/...", type: "password" },
+    ],
+    helpUrl: "https://api.slack.com/messaging/webhooks",
+    badge: "Alerts",
+  },
+  {
+    key: "salesforce",
+    name: "Salesforce CRM",
+    description: "Closed-won deals, new leads, open pipeline value, and activity data synced alongside your ad and revenue metrics.",
+    icon: "SF",
+    iconBg: "rgba(0,161,224,0.12)",
+    iconColor: "#00A1E0",
+    configType: "oauth",
+    badge: "CRM",
+  },
 ];
 
 type Config = Record<string, unknown>;
@@ -88,10 +113,13 @@ export default function IntegrationsPage() {
   }, []);
 
   function isConnected(key: string): boolean {
-    if (key === "google") return !!(config as Record<string, boolean>).google_connected;
-    if (key === "meta")   return !!(config as Record<string, boolean>).meta_connected;
-    if (key === "shopify") return !!(config as Record<string, Record<string, string>>).shopify?.store;
-    if (key === "klaviyo") return !!(config as Record<string, Record<string, string>>).klaviyo?.apiKey;
+    const cfg = config as Record<string, unknown>;
+    if (key === "google")      return !!(cfg.google_connected);
+    if (key === "meta")        return !!(cfg.meta_connected);
+    if (key === "shopify")     return !!((cfg.shopify as Record<string, string>)?.store);
+    if (key === "klaviyo")     return !!((cfg.klaviyo as Record<string, string>)?.apiKey);
+    if (key === "slack")       return !!(cfg.slack_connected);
+    if (key === "salesforce")  return !!(cfg.salesforce_connected);
     return false;
   }
 
@@ -158,10 +186,43 @@ export default function IntegrationsPage() {
     setLoad("klaviyo", false);
   }
 
+  async function connectSlack() {
+    const webhookUrl = (fieldVals["slack-webhook"] ?? "").trim();
+    if (!webhookUrl || !webhookUrl.startsWith("https://hooks.slack.com/")) {
+      setStatus("slack", "❌ Enter a valid Slack webhook URL");
+      return;
+    }
+    setLoad("slack", true);
+    setStatus("slack", "Verifying webhook…");
+
+    // Save to Supabase via API (also sends a test message to Slack)
+    const cfg = config as Record<string, string>;
+    const userId = cfg.userId;
+    const res = await fetch("/api/integrations/slack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, webhookUrl }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      setStatus("slack", "❌ " + (err.error ?? "Verification failed"));
+      setLoad("slack", false);
+      return;
+    }
+
+    await pulse?.saveConfig({ slack_connected: true, slack_webhook: webhookUrl });
+    const updated = await pulse?.getConfig();
+    setConfig(updated ?? {});
+    setStatus("slack", "✓ Connected — check Slack for a test message");
+    setLoad("slack", false);
+  }
+
   function handleConnect(integ: Integration) {
-    if (integ.configType === "oauth") connectOAuth(integ.key);
-    else if (integ.key === "shopify") connectShopify();
-    else if (integ.key === "klaviyo") connectKlaviyo();
+    if (integ.configType === "oauth")    connectOAuth(integ.key);
+    else if (integ.key === "shopify")    connectShopify();
+    else if (integ.key === "klaviyo")    connectKlaviyo();
+    else if (integ.key === "slack")      connectSlack();
   }
 
   return (
@@ -193,7 +254,7 @@ export default function IntegrationsPage() {
                   width: 44, height: 44, borderRadius: 11, flexShrink: 0,
                   background: integ.iconBg,
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 18, fontWeight: 700, color: integ.iconColor,
+                  fontSize: integ.icon.length > 1 ? 13 : 18, fontWeight: 700, color: integ.iconColor,
                 }}>
                   {integ.icon}
                 </div>
@@ -209,12 +270,19 @@ export default function IntegrationsPage() {
                         padding: "2px 8px", borderRadius: 100,
                       }}>LIVE</span>
                     )}
+                    {integ.badge && !connected && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, color: "#94a3b8",
+                        background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.15)",
+                        padding: "2px 8px", borderRadius: 100,
+                      }}>{integ.badge}</span>
+                    )}
                   </div>
                   <p style={{ fontSize: 13, color: "#4a5568", lineHeight: 1.6, marginBottom: integ.fields ? 16 : 0 }}>
                     {integ.description}
                   </p>
 
-                  {/* API key fields */}
+                  {/* Fields */}
                   {integ.fields && !connected && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14, maxWidth: 460 }}>
                       {integ.fields.map(f => (
@@ -241,13 +309,13 @@ export default function IntegrationsPage() {
                           onClick={() => pulse?.openExternal(integ.helpUrl!)}
                           style={{ background: "none", border: "none", color: "#00e5cc", fontSize: 12, cursor: "pointer", textAlign: "left", padding: 0 }}
                         >
-                          How to get your token →
+                          How to get your {integ.key === "slack" ? "webhook URL" : "token"} →
                         </button>
                       )}
                     </div>
                   )}
 
-                  {/* Status message */}
+                  {/* Status */}
                   {status && (
                     <div style={{
                       fontSize: 12, fontWeight: 500, marginBottom: 10,
@@ -257,7 +325,7 @@ export default function IntegrationsPage() {
                     </div>
                   )}
 
-                  {/* Action button */}
+                  {/* Button */}
                   <button
                     onClick={() => handleConnect(integ)}
                     disabled={busy || connected}

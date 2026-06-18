@@ -21,6 +21,8 @@ const isPublicRoute = createRouteMatcher([
   "/api/pulse-ai/(.*)",
   "/api/integrations/(.*)",
   "/api/reports/(.*)",
+  // Inngest webhook — Inngest's servers POST here to invoke scheduled functions
+  "/api/inngest",
   // /app is Electron-only and is never gated by a Clerk session -- the
   // desktop app's setup wizard has no Clerk sign-in step at all, and the
   // x-pulse-client header check below is the real access boundary for it.
