@@ -62,6 +62,83 @@ const NAV = [
   },
 ];
 
+// ─── TTS helper ─────────────────────────────────────────────────────────────
+function getBestVoice(): SpeechSynthesisVoice | null {
+  const voices = window.speechSynthesis.getVoices();
+  // Priority: neural/enhanced English voices that sound less robotic
+  const preferred = [
+    "Microsoft Aria", "Microsoft Jenny", "Microsoft Guy",
+    "Google US English", "Samantha", "Karen", "Daniel",
+    "Alex", "Zoe",
+  ];
+  for (const name of preferred) {
+    const v = voices.find(v => v.name.includes(name) && v.lang.startsWith("en"));
+    if (v) return v;
+  }
+  // Fall back to any English voice
+  return voices.find(v => v.lang.startsWith("en-US")) ??
+         voices.find(v => v.lang.startsWith("en")) ??
+         voices[0] ?? null;
+}
+
+function speak(text: string, onEnd?: () => void): SpeechSynthesisUtterance {
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate   = 1.05;  // slightly faster than default — feels more natural
+  utt.pitch  = 0.95;  // slightly lower — more AI-assistant-like
+  utt.volume = 1;
+  const setVoice = () => {
+    const v = getBestVoice();
+    if (v) utt.voice = v;
+    if (onEnd) utt.onend = onEnd;
+    window.speechSynthesis.speak(utt);
+  };
+  // Voices may not be loaded yet on first call
+  if (window.speechSynthesis.getVoices().length === 0) {
+    window.speechSynthesis.addEventListener("voiceschanged", setVoice, { once: true });
+  } else {
+    setVoice();
+  }
+  return utt;
+}
+
+// ─── Speech recognition (voice input) ──────────────────────────────────────
+// Web Speech API's SpeechRecognition isn't in TS's default lib types, so we
+// declare just enough of the shape used here. Electron's Chromium supports
+// this natively — no extra package, no Pulse backend involved.
+interface SpeechRecognitionResultLike {
+  isFinal: boolean;
+  0: { transcript: string };
+}
+interface SpeechRecognitionEventLike extends Event {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+}
+interface SpeechRecognitionLike extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((e: any) => void) | null;
+  onend: (() => void) | null;
+}
+
+function getSpeechRecognition(): SpeechRecognitionLike | null {
+  if (typeof window === "undefined") return null;
+  const Ctor =
+    (window as any).SpeechRecognition ||
+    (window as any).webkitSpeechRecognition;
+  if (!Ctor) return null;
+  const rec: SpeechRecognitionLike = new Ctor();
+  rec.continuous = false;
+  rec.interimResults = true;
+  rec.lang = "en-US";
+  return rec;
+}
+
 // ─── Pulse AI Chat drawer ─────────────────────────────────────────────────────
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -74,21 +151,80 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
+  const [listening, setListening] = useState(false);
+  const [vocalMode, setVocalMode] = useState(false);
+  const [interim, setInterim] = useState("");
+  const [voiceSupported] = useState(() => !!getSpeechRecognition());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
+  const recRef = useRef<SpeechRecognitionLike | null>(null);
+  const vocalModeRef = useRef(false);
+  vocalModeRef.current = vocalMode;
+
+  // Speak helper that also tracks which message index is speaking
+  const speakMessage = useCallback((text: string, idx: number, onDone?: () => void) => {
+    setSpeakingIdx(idx);
+    speak(text, () => {
+      setSpeakingIdx(curr => (curr === idx ? null : curr));
+      onDone?.();
+    });
+  }, []);
+
+  const stopListening = useCallback(() => {
+    try { recRef.current?.stop(); } catch {}
+    setListening(false);
+    setInterim("");
+  }, []);
+
+  const startListening = useCallback((onFinal: (text: string) => void) => {
+    const rec = getSpeechRecognition();
+    if (!rec) return;
+    recRef.current = rec;
+    setInterim("");
+    rec.onresult = (e) => {
+      let finalText = "";
+      let interimText = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) finalText += r[0].transcript;
+        else interimText += r[0].transcript;
+      }
+      if (interimText) setInterim(interimText);
+      if (finalText.trim()) {
+        setInterim("");
+        onFinal(finalText.trim());
+      }
+    };
+    rec.onerror = () => {
+      setListening(false);
+      setInterim("");
+    };
+    rec.onend = () => {
+      setListening(false);
+    };
+    setListening(true);
+    try { rec.start(); } catch {}
+  }, []);
 
   useEffect(() => {
     if (open) {
       setTimeout(() => inputRef.current?.focus(), 300);
+    } else {
+      // Stop any speech/listening when drawer closes
+      window.speechSynthesis?.cancel();
+      setSpeakingIdx(null);
+      stopListening();
+      setVocalMode(false);
     }
-  }, [open]);
+  }, [open, stopListening]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
+  const send = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if (!text || loading) return;
     setInput("");
     const next: Message[] = [...messages, { role: "user", content: text }];
@@ -102,13 +238,32 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
         body: JSON.stringify({ messages: next }),
       });
       const data = await res.json();
-      setMessages([...next, { role: "assistant", content: data.reply ?? "Sorry, I couldn't get a response. Try again." }]);
+      const replyText: string = data.reply ?? "Sorry, I couldn't get a response. Try again.";
+      const finalMessages = [...next, { role: "assistant" as const, content: replyText }];
+      setMessages(finalMessages);
+      const replyIdx = finalMessages.length - 1;
+
+      // In Vocal Mode, speak the reply aloud, then automatically start
+      // listening again for the next thing the user says — a hands-free loop.
+      if (vocalModeRef.current) {
+        speakMessage(replyText, replyIdx, () => {
+          if (vocalModeRef.current) {
+            startListening((heard) => send(heard));
+          }
+        });
+      }
     } catch {
-      setMessages([...next, { role: "assistant", content: "Something went wrong. Check your connection and try again." }]);
+      const finalMessages = [...next, { role: "assistant" as const, content: "Something went wrong. Check your connection and try again." }];
+      setMessages(finalMessages);
+      if (vocalModeRef.current) {
+        speakMessage(finalMessages[finalMessages.length - 1].content, finalMessages.length - 1, () => {
+          if (vocalModeRef.current) startListening((heard) => send(heard));
+        });
+      }
     } finally {
       setLoading(false);
     }
-  }, [input, loading, messages]);
+  }, [input, loading, messages, speakMessage, startListening]);
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -116,6 +271,33 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
       send();
     }
   }
+
+  // One-shot mic dictation: fills the input box, doesn't auto-send
+  const onMicClick = useCallback(() => {
+    if (listening) {
+      stopListening();
+      return;
+    }
+    startListening((heard) => {
+      setInput(prev => (prev ? prev + " " + heard : heard));
+      inputRef.current?.focus();
+    });
+  }, [listening, startListening, stopListening]);
+
+  // Vocal Mode toggle: starts/stops the hands-free conversational loop
+  const toggleVocalMode = useCallback(() => {
+    if (vocalMode) {
+      setVocalMode(false);
+      window.speechSynthesis?.cancel();
+      setSpeakingIdx(null);
+      stopListening();
+    } else {
+      setVocalMode(true);
+      if (!loading && speakingIdx === null) {
+        startListening((heard) => send(heard));
+      }
+    }
+  }, [vocalMode, loading, speakingIdx, startListening, stopListening, send]);
 
   return (
     <>
@@ -165,16 +347,48 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Pulse AI</div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#4ade80", display: "block" }} />
-              <span style={{ fontSize: 11, color: "#64748b" }}>On-device · Private</span>
+              <span style={{
+                width: 6, height: 6, borderRadius: "50%",
+                background: vocalMode ? "#00e5cc" : "#4ade80",
+                boxShadow: vocalMode ? "0 0 6px #00e5cc" : "none",
+                display: "block",
+                animation: (listening || speakingIdx !== null) ? "pulse-dot 1s ease-in-out infinite" : "none",
+              }} />
+              <span style={{ fontSize: 11, color: "#64748b" }}>
+                {vocalMode
+                  ? (listening ? "Listening…" : speakingIdx !== null ? "Speaking…" : "Vocal Mode · On-device")
+                  : "On-device · Private"}
+              </span>
             </div>
           </div>
+          {voiceSupported && (
+            <button
+              onClick={toggleVocalMode}
+              title={vocalMode ? "Turn off Vocal Mode" : "Turn on Vocal Mode — talk hands-free"}
+              style={{
+                width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                background: vocalMode ? "#00e5cc" : "rgba(255,255,255,0.04)",
+                border: `1px solid ${vocalMode ? "#00e5cc" : "#1e293b"}`,
+                cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "all 0.15s",
+                color: vocalMode ? "#0a0f1e" : "#64748b",
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+                <rect x="5.5" y="1" width="4" height="7.5" rx="2" stroke="currentColor" strokeWidth="1.3"/>
+                <path d="M3 7.5a4.5 4.5 0 009 0" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                <path d="M7.5 12v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              </svg>
+            </button>
+          )}
           <button
             onClick={onClose}
             style={{
               background: "transparent", border: "none",
               color: "#475569", cursor: "pointer",
               fontSize: 20, lineHeight: 1, padding: 4,
+              marginLeft: 2,
             }}
           >×</button>
         </div>
@@ -201,20 +415,63 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
               )}
               <div style={{
                 maxWidth: "80%",
-                background: m.role === "user"
-                  ? "rgba(0,229,204,0.1)"
-                  : "#111827",
-                border: m.role === "user"
-                  ? "1px solid rgba(0,229,204,0.2)"
-                  : "1px solid #1e293b",
-                borderRadius: m.role === "user" ? "12px 12px 4px 12px" : "12px 12px 12px 4px",
-                padding: "10px 14px",
-                fontSize: 13,
-                color: "#e2e8f0",
-                lineHeight: 1.65,
-                whiteSpace: "pre-wrap",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: m.role === "user" ? "flex-end" : "flex-start",
+                gap: 4,
               }}>
-                {m.content}
+                <div style={{
+                  background: m.role === "user"
+                    ? "rgba(0,229,204,0.1)"
+                    : "#111827",
+                  border: m.role === "user"
+                    ? "1px solid rgba(0,229,204,0.2)"
+                    : speakingIdx === i ? "1px solid rgba(0,229,204,0.5)" : "1px solid #1e293b",
+                  borderRadius: m.role === "user" ? "12px 12px 4px 12px" : "12px 12px 12px 4px",
+                  padding: "10px 14px",
+                  fontSize: 13,
+                  color: "#e2e8f0",
+                  lineHeight: 1.65,
+                  whiteSpace: "pre-wrap",
+                  transition: "border-color 0.2s",
+                }}>
+                  {m.content}
+                </div>
+                {m.role === "assistant" && (
+                  <button
+                    onClick={() => {
+                      if (speakingIdx === i) {
+                        window.speechSynthesis?.cancel();
+                        setSpeakingIdx(null);
+                      } else {
+                        speakMessage(m.content, i);
+                      }
+                    }}
+                    title={speakingIdx === i ? "Stop" : "Read aloud"}
+                    style={{
+                      background: "transparent", border: "none", cursor: "pointer",
+                      color: speakingIdx === i ? "#00e5cc" : "#475569",
+                      fontSize: 10, fontWeight: 600,
+                      display: "flex", alignItems: "center", gap: 4,
+                      padding: "2px 4px",
+                    }}
+                  >
+                    {speakingIdx === i ? (
+                      <>
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><rect width="10" height="10" rx="1.5"/></svg>
+                        Stop
+                      </>
+                    ) : (
+                      <>
+                        <svg width="11" height="11" viewBox="0 0 15 15" fill="none">
+                          <path d="M2 5.5h2.3L7.5 2.5v10L4.3 9.5H2v-4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                          <path d="M10.2 5.3a3 3 0 010 4.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                        </svg>
+                        Listen
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -282,18 +539,29 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
           borderTop: "1px solid #1e293b",
           flexShrink: 0,
         }}>
+          {vocalMode && (interim || listening) && (
+            <div style={{
+              fontSize: 11.5, color: "#00e5cc", marginBottom: 8,
+              padding: "6px 10px", borderRadius: 8,
+              background: "rgba(0,229,204,0.06)", border: "1px solid rgba(0,229,204,0.15)",
+              fontStyle: interim ? "normal" : "italic",
+            }}>
+              {interim || "Listening…"}
+            </div>
+          )}
           <div style={{
             display: "flex", gap: 8, alignItems: "flex-end",
             background: "#0a0f1e",
-            border: "1px solid #1e293b",
+            border: `1px solid ${listening ? "rgba(0,229,204,0.4)" : "#1e293b"}`,
             borderRadius: 12, padding: "8px 8px 8px 14px",
+            transition: "border-color 0.2s",
           }}>
             <textarea
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="Ask anything about your data…"
+              placeholder={vocalMode ? "Vocal Mode is on — just talk, or type here…" : "Ask anything about your data…"}
               rows={1}
               style={{
                 flex: 1, background: "transparent", border: "none",
@@ -302,8 +570,28 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
                 maxHeight: 120, overflowY: "auto",
               }}
             />
+            {voiceSupported && !vocalMode && (
+              <button
+                onClick={onMicClick}
+                title={listening ? "Stop listening" : "Dictate a message"}
+                style={{
+                  width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                  background: listening ? "#f87171" : "#1e293b",
+                  border: "none", cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "background 0.15s",
+                  color: listening ? "#fff" : "#94a3b8",
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 15 15" fill="none">
+                  <rect x="5.5" y="1" width="4" height="7.5" rx="2" stroke="currentColor" strokeWidth="1.3"/>
+                  <path d="M3 7.5a4.5 4.5 0 009 0" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                  <path d="M7.5 12v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                </svg>
+              </button>
+            )}
             <button
-              onClick={send}
+              onClick={() => send()}
               disabled={!input.trim() || loading}
               style={{
                 width: 32, height: 32, borderRadius: 8, flexShrink: 0,
@@ -319,7 +607,11 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
             </button>
           </div>
           <div style={{ fontSize: 10, color: "#334155", marginTop: 6, textAlign: "center" }}>
-            Enter to send · Shift+Enter for new line
+            {vocalMode
+              ? "Vocal Mode · tap the speaker icon above to turn it off"
+              : voiceSupported
+                ? "Enter to send · Shift+Enter for new line · mic to dictate"
+                : "Enter to send · Shift+Enter for new line"}
           </div>
         </div>
       </div>
@@ -328,6 +620,10 @@ function PulseAIDrawer({ open, onClose }: { open: boolean; onClose: () => void }
         @keyframes bounce-dot {
           0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
           40% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes pulse-dot {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.5; transform: scale(1.3); }
         }
       `}</style>
     </>
