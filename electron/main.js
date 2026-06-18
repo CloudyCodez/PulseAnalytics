@@ -1102,7 +1102,7 @@ ipcMain.handle("license:verify", async (_e, email) => {
   try {
     const result = await verifyLicenseEmail(email);
     if (result.valid) {
-      writeConfig({ license: { verified: true, email: result.email, plan: result.plan } });
+      writeConfig({ license: { verified: true, email: result.email, plan: result.plan }, userId: result.userId });
       // Give the renderer a moment to show its success state, then advance
       // to setup or the main app exactly like a normal cold start would.
       setTimeout(() => {

@@ -13,7 +13,7 @@ export async function POST(req: Request) {
 
     const { data: user, error } = await supabase
       .from("users")
-      .select("clerk_user_id, email, plan")
+      .select("id, clerk_user_id, email, plan")
       .eq("email", email.toLowerCase().trim())
       .single();
 
@@ -27,10 +27,11 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({
-      valid:  true,
-      email:  user.email,
-      plan:   user.plan,
-      userId: user.clerk_user_id,
+      valid:   true,
+      email:   user.email,
+      plan:    user.plan,
+      userId:  user.id,            // Supabase internal UUID — saved to config.json
+      clerkId: user.clerk_user_id,
     });
 
   } catch (err) {
