@@ -4,7 +4,40 @@ import { createServiceClient } from "@/lib/supabase/server";
 // GET /api/reports
 // Supports both Clerk-authenticated web requests and Electron desktop requests.
 // Electron sends x-pulse-user-id header with the internal Supabase user ID.
+//
+// Like /api/app/dashboard, this proxies to pulseanalytics.space when running
+// without SUPABASE_SERVICE_ROLE_KEY (always true in the packaged Electron
+// build, by design — see build-pulse.bat). The web path below only runs when
+// the service-role key IS present, i.e. when this code is actually executing
+// on Vercel.
+const REMOTE_APP_URL = "https://pulseanalytics.space";
+
+async function proxyToVercel(req: NextRequest): Promise<NextResponse> {
+  const userId = req.headers.get("x-pulse-user-id") ?? "";
+  const { search } = new URL(req.url);
+
+  try {
+    const res = await fetch(`${REMOTE_APP_URL}/api/reports${search}`, {
+      method: "GET",
+      headers: { "x-pulse-user-id": userId },
+      cache: "no-store",
+    });
+    const data = await res.json();
+    return NextResponse.json(data, { status: res.status });
+  } catch (err) {
+    console.error("[reports] proxy to Vercel failed:", err);
+    return NextResponse.json({ error: "Could not reach Pulse servers — check your connection." }, { status: 503 });
+  }
+}
+
 export async function GET(req: NextRequest) {
+  const electronUserId = req.headers.get("x-pulse-user-id");
+
+  // No service-role key locally (by design) — proxy to the hosted app.
+  if (electronUserId && !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    return proxyToVercel(req);
+  }
+
   const supabase = createServiceClient();
 
   const { searchParams } = new URL(req.url);
@@ -12,7 +45,6 @@ export async function GET(req: NextRequest) {
   const offset = parseInt(searchParams.get("offset") ?? "0");
 
   // Electron path — user ID passed directly via header
-  const electronUserId = req.headers.get("x-pulse-user-id");
   if (electronUserId) {
     const { data: reports, error } = await supabase
       .from("reports")
