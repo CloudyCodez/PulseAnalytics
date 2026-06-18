@@ -1,7 +1,9 @@
 import { Resend } from "resend";
 import type { ConnectorData } from "@/lib/connectors";
 
-const resend = new Resend(process.env.RESEND_API_KEY!);
+function getResend() {
+  return new Resend(process.env.RESEND_API_KEY!);
+}
 
 function fmt(n: number, prefix = "") {
   if (n >= 1_000_000) return `${prefix}${(n / 1_000_000).toFixed(2)}M`;
@@ -81,7 +83,7 @@ export async function sendReport({
 
   const html = buildEmailHtml(companyName, data, commentary, weekLabel);
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: process.env.RESEND_FROM_EMAIL!,
     to: user.email,
     subject: `${companyName} — Weekly Performance Report (${weekLabel})`,

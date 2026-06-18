@@ -12,6 +12,21 @@ const isPublicRoute = createRouteMatcher([
   "/pricing(.*)",
   "/api/webhooks/(.*)",
   "/api/stripe/checkout(.*)",
+  // Called from the Electron app's license screen before any Clerk session
+  // exists -- the user is just typing the email they purchased with, so this
+  // must be reachable without an auth handshake. The route itself does its
+  // own Supabase lookup and is not a general-purpose endpoint.
+  "/api/desktop/verify(.*)",
+  // /app is Electron-only and is never gated by a Clerk session -- the
+  // desktop app's setup wizard has no Clerk sign-in step at all, and the
+  // x-pulse-client header check below is the real access boundary for it.
+  // Routing it through Clerk's auth handshake anyway, with no real Clerk
+  // session ever present in Electron's BrowserWindow, is what was causing
+  // the /app redirect loop (hundreds of identical requests/sec, eventual
+  // 500). Treating it as public here skips Clerk's handshake for this
+  // route entirely while isElectronOnlyRoute below still blocks any
+  // non-Electron client from reaching it.
+  "/app(.*)",
 ]);
 
 const isElectronOnlyRoute = createRouteMatcher(["/app(.*)"]);
@@ -32,7 +47,7 @@ const liveMiddleware = clerkMiddleware((auth, req) => {
 
   // Protect non-public routes
   if (!isPublicRoute(req)) {
-    auth().protect();
+    auth().protect({ unauthenticatedUrl: new URL("/sign-in", req.url).toString() });
   }
 
   return NextResponse.next();

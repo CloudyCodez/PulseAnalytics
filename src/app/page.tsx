@@ -144,9 +144,9 @@ export default function HomePage() {
         .footer-links { display: flex; gap: 24px; }
         .footer-links a { font-size: 0.82rem; color: var(--muted); text-decoration: none; transition: color .2s; }
         .footer-links a:hover { color: var(--white); }
-        .reveal { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
+        .reveal { opacity: 1; transform: none; transition: opacity .6s ease, transform .6s ease; }
         .reveal.visible { opacity: 1; transform: none; }
-        .stagger { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
+        .stagger { opacity: 1; transform: none; transition: opacity .6s ease, transform .6s ease; }
         .stagger.visible { opacity: 1; transform: none; }
       `}</style>
 

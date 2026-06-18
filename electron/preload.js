@@ -25,6 +25,13 @@ contextBridge.exposeInMainWorld("pulse", {
   /** Verify a Klaviyo API key. Returns { success, orgName?, error? } */
   verifyKlaviyo: (apiKey) => ipcRenderer.invoke("verify:klaviyo", apiKey),
 
+  /**
+   * Verify a license by email against the Pulse server (Supabase users table).
+   * Returns { valid, plan?, email?, reason? } where reason is one of
+   * "not_found" | "not_active" | "server_error" on failure.
+   */
+  verifyLicense: (email) => ipcRenderer.invoke("license:verify", email),
+
   // ── Config ────────────────────────────────────────────────────────────────
   /** Persist key/value config to disk */
   saveConfig: (values) => ipcRenderer.invoke("config:save", values),

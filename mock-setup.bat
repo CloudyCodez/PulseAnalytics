@@ -156,6 +156,21 @@ for /f "tokens=*" %%k in ('node -e "console.log(require('crypto').randomBytes(32
 
 echo  Writing mock configuration...
 
+:: ── SAFETY CHECK: don't overwrite real keys ───────────────────────────────
+if exist .env.local (
+    findstr /c:"pk_live_" .env.local >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo  [!] SAFETY STOP: .env.local already contains live production keys.
+        echo      Mock setup would overwrite them. Aborting to protect your data.
+        echo.
+        echo      If you really want mock mode, rename .env.local first.
+        echo.
+        pause >nul
+        goto :eof
+    )
+)
+
 (
 echo NEXT_PUBLIC_MOCK_MODE=true
 echo NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_mock_local_key

@@ -34,6 +34,20 @@ goto END
 :: ─────────────────────────────────────────────────────────────────────────────
 :DEMO
 echo.
+:: ── SAFETY CHECK: don't overwrite real keys ───────────────────────────────
+if exist .env.local (
+    findstr /c:"pk_live_" .env.local >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo  [!] SAFETY STOP: .env.local contains live production keys.
+        echo      Demo/mock build would overwrite them. Aborting.
+        echo.
+        echo      Rename .env.local first if you truly want a demo build.
+        echo.
+        pause
+        goto END
+    )
+)
 call :section "STEP 1" "Checking dependencies"
 call npm install
 if errorlevel 1 ( call :fail "npm install failed." )
@@ -58,6 +72,8 @@ if exist .next rmdir /s /q .next
 set NEXT_PUBLIC_MOCK_MODE=true
 call npx next build
 if errorlevel 1 ( call :fail "Next.js build failed. Check errors above." )
+call node scripts\prepare-standalone.js
+if errorlevel 1 ( call :fail "Standalone preparation failed." )
 if not exist .next\standalone ( call :fail "Standalone output missing. next.config.js output must be set to standalone." )
 echo  [OK] Next.js built.
 
@@ -282,6 +298,8 @@ if exist .next rmdir /s /q .next
 set NEXT_PUBLIC_MOCK_MODE=false
 call npx next build
 if errorlevel 1 ( call :fail "Next.js build failed. Check errors above." )
+call node scripts\prepare-standalone.js
+if errorlevel 1 ( call :fail "Standalone preparation failed." )
 if not exist .next\standalone ( call :fail "Standalone output missing. next.config.js output must be set to standalone." )
 echo  [OK] Next.js built.
 

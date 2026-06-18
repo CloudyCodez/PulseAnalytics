@@ -15,7 +15,6 @@ const path = require("path");
 const port = process.env.PORT || "3000";
 
 process.env.PORT = port;
-process.env.HOSTNAME = "127.0.0.1";
 
 // Load the Next.js standalone server
 require("./server.js");

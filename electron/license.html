@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Activate Pulse</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0f1e;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+
+    /* Title bar */
+    .titlebar {
+      height: 36px;
+      background: #080c18;
+      border-bottom: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      flex-shrink: 0;
+    }
+    .titlebar-logo { font-size: 13px; font-weight: 700; color: #fff; }
+    .titlebar-logo span { color: #00e5cc; }
+
+    /* Main content */
+    .container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 40px;
+      -webkit-app-region: no-drag;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 400px;
+    }
+
+    .icon {
+      width: 56px;
+      height: 56px;
+      background: rgba(0,229,204,0.1);
+      border: 1px solid rgba(0,229,204,0.2);
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 26px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -0.4px;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: #64748b;
+      line-height: 1.6;
+      margin-bottom: 28px;
+    }
+
+    .field-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .field-input {
+      width: 100%;
+      background: #0d1526;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-family: inherit;
+      font-size: 14px;
+      color: #e2e8f0;
+      outline: none;
+      transition: border-color 0.15s;
+      margin-bottom: 16px;
+    }
+    .field-input:focus { border-color: rgba(0,229,204,0.4); }
+    .field-input::placeholder { color: #334155; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 13px;
+      background: #00e5cc;
+      color: #0a0f1e;
+      border: none;
+      border-radius: 10px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .status {
+      display: none;
+      margin-top: 14px;
+      padding: 11px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .status.error {
+      background: rgba(248,113,113,0.08);
+      border: 1px solid rgba(248,113,113,0.2);
+      color: #f87171;
+    }
+    .status.success {
+      background: rgba(34,197,94,0.08);
+      border: 1px solid rgba(34,197,94,0.2);
+      color: #4ade80;
+    }
+
+    .divider {
+      margin: 24px 0;
+      border: none;
+      border-top: 1px solid #1e293b;
+    }
+
+    .footer-link {
+      text-align: center;
+      font-size: 12px;
+      color: #475569;
+      line-height: 1.6;
+    }
+    .footer-link a {
+      color: #00e5cc;
+      text-decoration: none;
+    }
+
+    .spinner {
+      width: 15px; height: 15px;
+      border: 2px solid rgba(10,15,30,0.3);
+      border-top-color: #0a0f1e;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Success state */
+    .success-view {
+      display: none;
+      text-align: center;
+    }
+    .success-check {
+      width: 64px;
+      height: 64px;
+      background: rgba(34,197,94,0.1);
+      border: 1px solid rgba(34,197,94,0.2);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      margin: 0 auto 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <span class="titlebar-logo">Pulse<span>.</span> License Activation</span>
+  </div>
+
+  <div class="container">
+    <div class="card">
+
+      <!-- Default view -->
+      <div id="default-view">
+        <div class="icon">⚡</div>
+        <h1>Activate Pulse</h1>
+        <p class="subtitle">
+          Enter the email address you used when you purchased Pulse. We'll verify your license and get you set up.
+        </p>
+
+        <label class="field-label">Email address</label>
+        <input
+          class="field-input"
+          id="email-input"
+          type="email"
+          placeholder="you@youragency.com"
+          autocomplete="email"
+        />
+
+        <button class="btn-primary" id="verify-btn" onclick="verify()">
+          Verify License
+        </button>
+
+        <div class="status" id="status-msg"></div>
+
+        <hr class="divider" />
+
+        <div class="footer-link">
+          Don't have an account?
+          <a href="#" onclick="openSite()">Start your free trial at pulseanalytics.space</a>
+        </div>
+      </div>
+
+      <!-- Success view -->
+      <div class="success-view" id="success-view">
+        <div class="success-check">✓</div>
+        <h1 style="text-align:center;margin-bottom:8px;">License Verified</h1>
+        <p style="text-align:center;color:#64748b;font-size:13px;margin-bottom:4px;" id="success-plan"></p>
+        <p style="text-align:center;color:#64748b;font-size:13px;">Launching setup wizard…</p>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const emailInput = document.getElementById('email-input');
+    const verifyBtn  = document.getElementById('verify-btn');
+    const statusMsg  = document.getElementById('status-msg');
+
+    emailInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') verify();
+    });
+
+    function openSite() {
+      window.pulse.openExternal('https://pulseanalytics.space/#pricing');
+    }
+
+    function showStatus(type, msg) {
+      statusMsg.textContent = msg;
+      statusMsg.className = 'status ' + type;
+      statusMsg.style.display = 'block';
+    }
+
+    async function verify() {
+      const email = emailInput.value.trim().toLowerCase();
+      if (!email || !email.includes('@')) {
+        showStatus('error', 'Please enter a valid email address.');
+        return;
+      }
+
+      verifyBtn.disabled = true;
+      verifyBtn.innerHTML = '<span class="spinner"></span> Verifying…';
+      statusMsg.style.display = 'none';
+
+      try {
+        const result = await window.pulse.verifyLicense(email);
+
+        if (result.valid) {
+          // Show success then let main process proceed
+          document.getElementById('default-view').style.display = 'none';
+          const sv = document.getElementById('success-view');
+          sv.style.display = 'block';
+          document.getElementById('success-plan').textContent =
+            result.plan.charAt(0).toUpperCase() + result.plan.slice(1) + ' plan · ' + result.email;
+          // Main process handles the window transition
+        } else {
+          const reasons = {
+            not_found:   "No account found for this email. Make sure you're using the email you signed up with.",
+            not_active:  "Your subscription is not active. Visit pulseanalytics.space to renew.",
+            server_error: "Could not reach the license server. Check your internet connection and try again.",
+          };
+          showStatus('error', reasons[result.reason] || 'Verification failed. Try again or contact support.');
+          verifyBtn.disabled = false;
+          verifyBtn.textContent = 'Verify License';
+        }
+      } catch (err) {
+        showStatus('error', 'Something went wrong. Check your internet connection and try again.');
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verify License';
+      }
+    }
+  </script>
+</body>
+</html>

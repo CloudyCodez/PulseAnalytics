@@ -12,9 +12,6 @@ const nextConfig = {
       { protocol: "https", hostname: "**.clerk.com" },
     ],
   },
-  experimental: {
-    serverComponentsExternalPackages: ["@anthropic-ai/sdk"],
-  },
 };
 
 module.exports = nextConfig;
