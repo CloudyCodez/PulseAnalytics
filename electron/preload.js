@@ -64,7 +64,44 @@ contextBridge.exposeInMainWorld("pulse", {
     return () => ipcRenderer.removeListener("ollama:progress", handler);
   },
 
-  // ── Setup lifecycle ───────────────────────────────────────────────────────
+  // ── Whisper / Voice input ─────────────────────────────────────────────────────────
+  /** Returns { ready: boolean } — whether whisper binary + model are on disk */
+  whisperStatus: () => ipcRenderer.invoke("whisper:status"),
+
+  /**
+   * Download + install whisper.cpp binary and base.en model (~150MB one-time).
+   * Progress events fire on onWhisperProgress. Returns { success, error? }.
+   */
+  installWhisper: () => ipcRenderer.invoke("whisper:install"),
+
+  /** Subscribe to whisper install progress events */
+  onWhisperProgress: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on("whisper:progress", handler);
+    return () => ipcRenderer.removeListener("whisper:progress", handler);
+  },
+
+  /**
+   * Transcribe a 16kHz mono PCM WAV passed as a Uint8Array.
+   * Returns { success, text?, error? }.
+   */
+  transcribe: (wavBytes) => ipcRenderer.invoke("whisper:transcribe", wavBytes),
+
+  /**
+   * Enumerate audio input/output devices. Returns an array of
+   * { deviceId, kind, label } objects so the UI can offer device pickers.
+   */
+  listAudioDevices: async () => {
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())).catch(() => {});
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.map(d => ({ deviceId: d.deviceId, kind: d.kind, label: d.label || d.deviceId }));
+    } catch {
+      return [];
+    }
+  },
+
+  // ── Setup lifecycle ────────────────────────────────────────────────────────────
   /** Mark setup complete and open the main app window */
   completeSetup: () => ipcRenderer.invoke("setup:complete"),
 

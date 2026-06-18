@@ -507,6 +507,182 @@ function pullModel(modelName, onProgress) {
   });
 }
 
+// ─── Voice input (whisper.cpp — internal — never exposed to user) ────────────
+// The Web Speech API's SpeechRecognition (webkitSpeechRecognition) is a
+// non-starter inside Electron: it's not actually local speech-to-text, it's
+// a thin client that streams mic audio to Google's speech servers and waits
+// for a transcript, authenticated with an API key that only ships in
+// official Google Chrome builds. Electron's bundled Chromium doesn't have
+// that key, so the request to Google never resolves — recognition.onstart
+// fires (mic opens fine, UI correctly shows "listening"), but no transcript
+// (interim or final) ever comes back, and depending on the Chromium build it
+// may not even surface as a proper onerror. That's the exact "stuck on
+// Listening, never picks anything up" symptom.
+//
+// The fix: do speech-to-text fully locally with whisper.cpp, the same way
+// Pulse AI's chat already runs fully locally via Ollama. We download a
+// prebuilt CPU-only Windows binary + a small English model once (mirroring
+// installAndPullOllama's pattern below), then for each utterance: capture
+// raw mic audio in the renderer, encode it to a 16kHz mono WAV, hand the
+// bytes to this process over IPC, run whisper-cli.exe against a temp WAV
+// file, and read back the plain-text transcript it writes to disk.
+const WHISPER_DIR        = path.join(app.getPath("userData"), "whisper");
+const WHISPER_BIN_DIR    = path.join(WHISPER_DIR, "bin");
+const WHISPER_MODEL_DIR  = path.join(WHISPER_DIR, "models");
+const WHISPER_MODEL_PATH = path.join(WHISPER_MODEL_DIR, "ggml-base.en.bin");
+// GitHub's "latest" release alias always resolves to whatever the current
+// release's asset with this exact filename is — same reasoning as the
+// versionless Ollama download URL above, so this doesn't go stale.
+const WHISPER_ZIP_URL    = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
+// base.en (~148MB) — noticeably more accurate than tiny.en (~75MB) for a
+// modest size difference, and English-only (.en models) is meaningfully
+// better than the multilingual variant at the same size since Pulse AI's
+// chat is English-only anyway.
+const WHISPER_MODEL_URL  = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+
+function findWhisperBinary() {
+  const candidates = [
+    path.join(WHISPER_BIN_DIR, "whisper-cli.exe"), // current whisper.cpp releases
+    path.join(WHISPER_BIN_DIR, "main.exe"),         // older releases named it this
+  ];
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch {}
+  }
+  return null;
+}
+
+function isWhisperReady() {
+  return !!findWhisperBinary() && fs.existsSync(WHISPER_MODEL_PATH);
+}
+
+function extractZip(zipPath, destDir) {
+  return new Promise((resolve, reject) => {
+    try { fs.mkdirSync(destDir, { recursive: true }); } catch (e) { return reject(e); }
+    // Windows ships PowerShell's Expand-Archive by default on every 10/11
+    // install (PS 5.1+) — avoids pulling in a node zip dependency just to
+    // unpack a ~4MB archive.
+    const escZip  = zipPath.replace(/'/g, "''");
+    const escDest = destDir.replace(/'/g, "''");
+    const psCmd = `Expand-Archive -LiteralPath '${escZip}' -DestinationPath '${escDest}' -Force`;
+    const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCmd], {
+      stdio: "ignore",
+      shell: false,
+    });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Expand-Archive exited with code ${code}`));
+    });
+    proc.on("error", reject);
+  });
+}
+
+/**
+ * Download + install whisper.cpp's binary and model if not already present.
+ * Reports progress via progressCb({ pct, label }), Pulse-branded labels only
+ * — same convention as installAndPullOllama above.
+ */
+function installWhisper(progressCb) {
+  return new Promise(async (resolve) => {
+    const sendProgress = (pct, label) => { try { progressCb && progressCb({ pct, label }); } catch {} };
+
+    if (isWhisperReady()) {
+      sendProgress(100, "Voice input is ready");
+      return resolve({ success: true });
+    }
+
+    try {
+      fs.mkdirSync(WHISPER_DIR, { recursive: true });
+
+      if (!findWhisperBinary()) {
+        sendProgress(5, "Downloading voice input engine…");
+        const zipPath = path.join(os.tmpdir(), "pulse-whisper-bin.zip");
+        await downloadFile(WHISPER_ZIP_URL, zipPath, (pct) =>
+          sendProgress(5 + Math.round(pct * 20), "Downloading voice input engine…")
+        );
+        sendProgress(28, "Installing voice input engine…");
+        await extractZip(zipPath, WHISPER_BIN_DIR);
+        try { fs.unlinkSync(zipPath); } catch {}
+      }
+
+      if (!fs.existsSync(WHISPER_MODEL_PATH)) {
+        fs.mkdirSync(WHISPER_MODEL_DIR, { recursive: true });
+        sendProgress(35, "Downloading voice model (one-time, ~150MB)…");
+        await downloadFile(WHISPER_MODEL_URL, WHISPER_MODEL_PATH, (pct) =>
+          sendProgress(35 + Math.round(pct * 60), "Downloading voice model (one-time, ~150MB)…")
+        );
+      }
+
+      if (!isWhisperReady()) {
+        return resolve({ success: false, error: "Voice input setup completed but files are missing — try again." });
+      }
+
+      sendProgress(100, "Voice input is ready");
+      resolve({ success: true });
+    } catch (err) {
+      console.error("[Pulse] Voice input setup failed:", err.message);
+      resolve({ success: false, error: "Could not set up voice input: " + err.message });
+    }
+  });
+}
+
+/**
+ * Run whisper-cli.exe against raw WAV bytes (16kHz mono PCM, built by the
+ * renderer) and return the plain-text transcript.
+ */
+function transcribeAudio(wavBytes) {
+  return new Promise((resolve) => {
+    const binary = findWhisperBinary();
+    if (!binary || !fs.existsSync(WHISPER_MODEL_PATH)) {
+      return resolve({ success: false, error: "Voice input is not set up yet." });
+    }
+
+    const tmpId   = crypto.randomBytes(6).toString("hex");
+    const wavPath = path.join(os.tmpdir(), `pulse-voice-${tmpId}.wav`);
+    const outBase = path.join(os.tmpdir(), `pulse-voice-${tmpId}`);
+    const txtPath = outBase + ".txt";
+
+    function cleanup() {
+      try { fs.unlinkSync(wavPath); } catch {}
+      try { fs.unlinkSync(txtPath); } catch {}
+    }
+
+    try {
+      fs.writeFileSync(wavPath, Buffer.from(wavBytes));
+    } catch (err) {
+      return resolve({ success: false, error: "Could not save recording: " + err.message });
+    }
+
+    const args = [
+      "-m", WHISPER_MODEL_PATH,
+      "-f", wavPath,
+      "-l", "en",
+      "-nt",          // no timestamps in the output text
+      "-otxt",        // write a plain .txt transcript
+      "-of", outBase, // output basename — whisper-cli appends .txt
+    ];
+
+    const proc = spawn(binary, args, { cwd: WHISPER_BIN_DIR, stdio: "ignore", shell: false });
+    proc.on("error", (err) => {
+      cleanup();
+      resolve({ success: false, error: "Voice engine failed to start: " + err.message });
+    });
+    proc.on("close", (code) => {
+      try {
+        if (fs.existsSync(txtPath)) {
+          const text = fs.readFileSync(txtPath, "utf8").trim();
+          cleanup();
+          return resolve({ success: true, text });
+        }
+        cleanup();
+        resolve({ success: false, error: `Transcription failed (exit code ${code}).` });
+      } catch (err) {
+        cleanup();
+        resolve({ success: false, error: "Could not read transcript: " + err.message });
+      }
+    });
+  });
+}
+
 // ─── Next.js via utilityProcess ───────────────────────────────────────────────
 // IMPORTANT: do not pass PORT: "0" here expecting a true OS-assigned port.
 // Next.js's generated standalone server.js does:
@@ -1121,6 +1297,40 @@ ipcMain.handle("license:verify", async (_e, email) => {
   } catch (err) {
     return { valid: false, reason: "server_error" };
   }
+});
+
+// ─── Whisper IPC handlers ────────────────────────────────────────────────────
+
+ipcMain.handle("whisper:status", async () => {
+  return { ready: isWhisperReady() };
+});
+
+ipcMain.handle("whisper:install", async (_e) => {
+  const win = setupWindow || mainWindow;
+  const sendProgress = (pct, label) => {
+    if (win && !win.isDestroyed()) win.webContents.send("whisper:progress", { pct, label });
+  };
+  return installWhisper(sendProgress);
+});
+
+ipcMain.handle("whisper:transcribe", async (_e, wavBytes) => {
+  return transcribeAudio(wavBytes);
+});
+
+// ─── Audio device enumeration (for device picker in Vocal Mode settings) ─────
+// We ask the renderer to enumerate devices via a round-trip IPC because
+// navigator.mediaDevices is only available in the BrowserWindow renderer
+// context, not in the main process. The renderer calls pulse.listAudioDevices()
+// which sends the result of navigator.mediaDevices.enumerateDevices() back.
+ipcMain.handle("audio:getDevices", async (_e) => {
+  // This is forwarded from the renderer — see preload.js. Main process just
+  // stores the last known device list sent by the renderer via "audio:devices".
+  return audioDeviceCache || [];
+});
+
+let audioDeviceCache = null;
+ipcMain.on("audio:reportDevices", (_e, devices) => {
+  audioDeviceCache = devices;
 });
 
 ipcMain.handle("setup:complete", async () => {
